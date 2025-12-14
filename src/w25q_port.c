@@ -5,13 +5,13 @@
  *      Author: denwoken
  */
 
-
+#include <string.h>
 #include "w25q_port.h"
 #include "w25q_transfer_level.h"
 
 
 
-void w25q_port_dcache_clean(void *addr, size_t len){
+void dcache_clean_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
 	const uint32_t line = 32;
 	const uint32_t lineMsk = (line - 1);
@@ -22,7 +22,7 @@ void w25q_port_dcache_clean(void *addr, size_t len){
     	SCB_CleanDCache_by_Addr((uint32_t*)start, size);
 #endif
 }
-void w25q_port_dcache_invalidate(void *addr, size_t len){
+void dcache_invalidate_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
     const uint32_t line = 32;
     const uint32_t lineMsk = (line - 1);
@@ -34,7 +34,7 @@ void w25q_port_dcache_invalidate(void *addr, size_t len){
     	SCB_InvalidateDCache_by_Addr((uint32_t*)start, size);
 #endif
 }
-void w25q_port_dcache_clean_unaligned(void *addr, size_t len){
+void dcache_clean_unaligned_lines_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
 	const uint32_t line = 32;
 	const uint32_t lineMsk = (line - 1);
@@ -50,8 +50,9 @@ void w25q_port_dcache_clean_unaligned(void *addr, size_t len){
         SCB->DCCMVAC = start_line;
 
     //если  конец массива не выравнен
-    if (end_line != start_line && (((uintptr_t)addr + len) & lineMsk))
+    if (end_line != start_line && (((uintptr_t)addr + len) & lineMsk)){
         SCB->DCCMVAC = end_line;
+    }
 
 	__DSB();
 	__ISB();
@@ -69,6 +70,7 @@ static uint32_t __xferLines_to_HALInstrMode(const w25q_xfer_lines_t lines){
 		case W25Q_XFER_LINES_2: return QSPI_INSTRUCTION_2_LINES;
 		case W25Q_XFER_LINES_4: return QSPI_INSTRUCTION_4_LINES;
 	}
+	return QSPI_INSTRUCTION_NONE;
 }
 static uint32_t __xferLines_to_HALAddrMode(const w25q_xfer_lines_t lines){
 	switch(lines){
@@ -77,6 +79,7 @@ static uint32_t __xferLines_to_HALAddrMode(const w25q_xfer_lines_t lines){
 		case W25Q_XFER_LINES_2: return QSPI_ADDRESS_2_LINES;
 		case W25Q_XFER_LINES_4: return QSPI_ADDRESS_4_LINES;
 	}
+	return QSPI_ADDRESS_NONE;
 }
 static uint32_t __xferLines_to_HALDataMode(const w25q_xfer_lines_t lines){
 	switch(lines){
@@ -85,14 +88,35 @@ static uint32_t __xferLines_to_HALDataMode(const w25q_xfer_lines_t lines){
 		case W25Q_XFER_LINES_2: return QSPI_DATA_2_LINES;
 		case W25Q_XFER_LINES_4: return QSPI_DATA_4_LINES;
 	}
+	return QSPI_DATA_NONE;
 }
-static uint32_t __xferAddrBits_to_HALAddrBits(const w25q_xfer_addr_bits_t addr_bits){
-	switch(addr_bits){
-		case W25Q_XFER_ADDR_8: return QSPI_ADDRESS_8_BITS;
-		case W25Q_XFER_ADDR_16: return QSPI_ADDRESS_16_BITS;
-		case W25Q_XFER_ADDR_24: return QSPI_ADDRESS_24_BITS;
-		case W25Q_XFER_ADDR_32: return QSPI_ADDRESS_32_BITS;
+static uint32_t __xferLines_to_HALAlterMode(const w25q_xfer_lines_t lines){
+	switch(lines){
+		case W25Q_XFER_LINES_0: return QSPI_ALTERNATE_BYTES_NONE;
+		case W25Q_XFER_LINES_1: return QSPI_ALTERNATE_BYTES_1_LINE;
+		case W25Q_XFER_LINES_2: return QSPI_ALTERNATE_BYTES_2_LINES;
+		case W25Q_XFER_LINES_4: return QSPI_ALTERNATE_BYTES_4_LINES;
 	}
+	return QSPI_ALTERNATE_BYTES_NONE;
+}
+
+static uint32_t __xferBits_to_HALAddrBits(const w25q_xfer_bits_t bits){
+	switch(bits){
+		case W25Q_XFER_BITS_8: return QSPI_ADDRESS_8_BITS;
+		case W25Q_XFER_BITS_16: return QSPI_ADDRESS_16_BITS;
+		case W25Q_XFER_BITS_24: return QSPI_ADDRESS_24_BITS;
+		case W25Q_XFER_BITS_32: return QSPI_ADDRESS_32_BITS;
+	}
+	return QSPI_ADDRESS_8_BITS;
+}
+static uint32_t __xferBits_to_HALAlterBits(const w25q_xfer_bits_t bits){
+	switch(bits){
+		case W25Q_XFER_BITS_8: return QSPI_ALTERNATE_BYTES_8_BITS;
+		case W25Q_XFER_BITS_16: return QSPI_ALTERNATE_BYTES_16_BITS;
+		case W25Q_XFER_BITS_24: return QSPI_ALTERNATE_BYTES_24_BITS;
+		case W25Q_XFER_BITS_32: return QSPI_ALTERNATE_BYTES_32_BITS;
+	}
+	return QSPI_ALTERNATE_BYTES_8_BITS;
 }
 static QSPI_CommandTypeDef build_qspi_cmd(const w25q_transfer_t *c)
 {
@@ -101,10 +125,12 @@ static QSPI_CommandTypeDef build_qspi_cmd(const w25q_transfer_t *c)
     sCommand.Instruction     = c->instruction;
 
     sCommand.Address         = c->address;
-    sCommand.AddressSize     = __xferAddrBits_to_HALAddrBits(c->addr_bits);
+    sCommand.AddressSize     = __xferBits_to_HALAddrBits(c->addr_bits);
     sCommand.AddressMode     = __xferLines_to_HALAddrMode(c->addr_lines);
 
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
+    sCommand.AlternateByteMode = __xferLines_to_HALAlterMode(c->alt_lines);
+    sCommand.AlternateBytesSize= __xferBits_to_HALAlterBits(c->alt_bits);
+	sCommand.AlternateBytes = c->alt_data;
 
     sCommand.DataMode        = __xferLines_to_HALDataMode(c->data_lines);
     sCommand.NbData          = c->data_len;
@@ -117,6 +143,50 @@ static QSPI_CommandTypeDef build_qspi_cmd(const w25q_transfer_t *c)
 
 	return sCommand;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+volatile bool qspi_done = false;
+void W25Q_DMA_startTransfer(){
+	qspi_done = false;
+}
+
+HAL_StatusTypeDef w25q_port_wait_dma(void* port_ctx, uint32_t Timeout){
+    uint32_t Tickstart = HAL_GetTick();
+
+    while (!qspi_done)
+    {
+        if ((HAL_GetTick() - Tickstart) > Timeout)
+            return HAL_TIMEOUT;
+        __NOP();
+    }
+    return HAL_OK;
+}
+void HAL_QSPI_RxCpltCallback(QSPI_HandleTypeDef *hqspi){
+	 qspi_done = true;
+}
+void HAL_QSPI_TxCpltCallback(QSPI_HandleTypeDef *hqspi){
+	 qspi_done = true;
+}
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -204,21 +274,24 @@ w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint3
         }
         return W25Q_OK;
     }
-//    else {
-//        // DMA path — port does cache maintenance + starts DMA + returns after waiting
-//        if (c->direction == W25Q_XFER_TX) {
-//            dcache_clean_by_addr((void*)c->buf, c->data_len);
-//            W25Q_DMA_startTransfer(); // твоя функция или внутр.флаг
-//            if (HAL_QSPI_Transmit_DMA(t->hqspi, (uint8_t*)c->buf) != HAL_OK) return W25Q_TRANSMIT_DATA_ERROR;
-//        } else {
-//            dcache_clean_unaligned_lines_by_addr((void*)c->buf, c->data_len);
-//            W25Q_DMA_startTransfer();
-//            if (HAL_QSPI_Receive_DMA(t->hqspi, (uint8_t*)c->buf) != HAL_OK) return W25Q_RECEIVE_DATA_ERROR;
-//        }
-//        if (w25q_port_wait_dma(port_ctx, Timeout) != W25Q_OK) return W25Q_DMA_TIMEOUT;
-//        if (c->direction == W25Q_XFER_RX) dcache_invalidate_by_addr((void*)c->buf, c->data_len);
-//        return W25Q_OK;
-//    }
+    else {
+        // DMA path — port does cache maintenance + starts DMA + returns after waiting
+        if (c->direction == W25Q_XFER_TX) {
+            dcache_clean_by_addr((void*)c->buf, c->data_len);
+            W25Q_DMA_startTransfer(); // твоя функция или внутр.флаг
+
+            if (HAL_QSPI_Transmit_DMA(t->hqspi, (uint8_t*)c->buf) != HAL_OK) return W25Q_TRANSMIT_DATA_ERROR;
+        } else {
+            dcache_clean_unaligned_lines_by_addr((void*)c->buf, c->data_len);
+            W25Q_DMA_startTransfer();
+            if (HAL_QSPI_Receive_DMA(t->hqspi, (uint8_t*)c->buf) != HAL_OK) return W25Q_RECEIVE_DATA_ERROR;
+        }
+        if (w25q_port_wait_dma(port_ctx, Timeout) != W25Q_OK) return W25Q_DMA_TIMEOUT;
+        if (c->direction == W25Q_XFER_RX) dcache_invalidate_by_addr((void*)c->buf, c->data_len);
+        return W25Q_OK;
+    }
+
+    return W25Q_UNKNOWN_ERROR;
 }
 
 

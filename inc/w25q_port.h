@@ -39,10 +39,10 @@ typedef struct {
 
 
 /* DCache operations (if CPU has D-cache and its enabled) */
-void w25q_port_dcache_clean(void *addr, size_t len);
-void w25q_port_dcache_invalidate(void *addr, size_t len);
-void w25q_port_dcache_clean_unaligned(void *addr, size_t len);
-
+//void w25q_port_dcache_clean(void *addr, size_t len);
+//void w25q_port_dcache_invalidate(void *addr, size_t len);
+//void w25q_port_dcache_clean_unaligned(void *addr, size_t len);
+//
 
 
 
