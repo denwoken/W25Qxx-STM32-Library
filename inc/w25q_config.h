@@ -8,4 +8,4 @@
 
 
 
-#define W25Q_COMMON_TIMEOUT_MS 100
+

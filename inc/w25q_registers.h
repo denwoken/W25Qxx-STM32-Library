@@ -72,6 +72,17 @@
 
 
 
+// timeouts
+#define W25Q_COMMON_TIMEOUT_MS 100
+
+#define W25Q_ERASE_4K_TIMEOUT_MS 400
+#define W25Q_ERASE_32K_TIMEOUT_MS 800
+#define W25Q_ERASE_64K_TIMEOUT_MS 1000
+#define W25Q_ERASE_FULL_TIMEOUT_MS 15000
+
+
+
+
 typedef union {
 	struct{
 		uint8_t BUSY : 1;   // S0  Erase/Write in Progress

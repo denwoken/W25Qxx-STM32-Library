@@ -10,8 +10,8 @@
 #include "w25q_transfer_level.h"
 
 
-
-void dcache_clean_by_addr(void *addr, size_t len){
+// cache specific functions; works only when Data cache enabled
+void __dcache_clean_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
 	const uint32_t line = 32;
 	const uint32_t lineMsk = (line - 1);
@@ -22,7 +22,7 @@ void dcache_clean_by_addr(void *addr, size_t len){
     	SCB_CleanDCache_by_Addr((uint32_t*)start, size);
 #endif
 }
-void dcache_invalidate_by_addr(void *addr, size_t len){
+void __dcache_invalidate_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
     const uint32_t line = 32;
     const uint32_t lineMsk = (line - 1);
@@ -34,7 +34,7 @@ void dcache_invalidate_by_addr(void *addr, size_t len){
     	SCB_InvalidateDCache_by_Addr((uint32_t*)start, size);
 #endif
 }
-void dcache_clean_unaligned_lines_by_addr(void *addr, size_t len){
+void __dcache_clean_unaligned_lines_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
 	const uint32_t line = 32;
 	const uint32_t lineMsk = (line - 1);
@@ -62,7 +62,7 @@ void dcache_clean_unaligned_lines_by_addr(void *addr, size_t len){
 
 
 
-
+// convert transfer level enums to HAL types
 static uint32_t __xferLines_to_HALInstrMode(const w25q_xfer_lines_t lines){
 	switch(lines){
 		case W25Q_XFER_LINES_0: return QSPI_INSTRUCTION_NONE;
@@ -154,22 +154,22 @@ static QSPI_CommandTypeDef build_qspi_cmd(const w25q_transfer_t *c)
 
 
 
-
-volatile bool qspi_done = false;
-void W25Q_DMA_startTransfer(){
+// functions specific for dma use
+__IO bool qspi_done = false;
+static void __DMA_startTransfer(){
 	qspi_done = false;
 }
 
-HAL_StatusTypeDef w25q_port_wait_dma(void* port_ctx, uint32_t Timeout){
+w25q_status_t __wait_dma(void* port_ctx, uint32_t Timeout){
     uint32_t Tickstart = HAL_GetTick();
 
     while (!qspi_done)
     {
         if ((HAL_GetTick() - Tickstart) > Timeout)
-            return HAL_TIMEOUT;
+            return W25Q_DMA_TIMEOUT;
         __NOP();
     }
-    return HAL_OK;
+    return W25Q_OK;
 }
 void HAL_QSPI_RxCpltCallback(QSPI_HandleTypeDef *hqspi){
 	 qspi_done = true;
@@ -177,14 +177,6 @@ void HAL_QSPI_RxCpltCallback(QSPI_HandleTypeDef *hqspi){
 void HAL_QSPI_TxCpltCallback(QSPI_HandleTypeDef *hqspi){
 	 qspi_done = true;
 }
-
-
-
-
-
-
-
-
 
 
 
@@ -203,53 +195,6 @@ w25q_status_t w25q_port_send_command(void *port_ctx, const w25q_transfer_t *c, u
 	return W25Q_OK;
 }
 
-
-/*
-w25q_status_t w25q_port_transmit(void *port_ctx,  const w25q_transfer_t *c, uint32_t Timeout){
-
-	assert_param(port_ctx);
-	assert_param(c);
-	assert_param(c->buf);
-	w25q_stm32_port_ctx_t *t = port_ctx;
-
-	w25q_status_t status = w25q_port_send_command(port_ctx, c, Timeout);
-	if(status!=W25Q_OK) return status;
-
-
-	HAL_StatusTypeDef err = HAL_QSPI_Transmit(t->hqspi, (uint8_t*)c->buf, Timeout);
-	switch(err)	{
-		case HAL_OK: 		return W25Q_OK;
-		case HAL_TIMEOUT: 	return W25Q_TRANSMIT_DATA_TIMEOUT;
-		case HAL_ERROR: 	return W25Q_TRANSMIT_DATA_ERROR;
-		case HAL_BUSY: 		return W25Q_TRANSMIT_DATA_ERROR;
-	}
-	return W25Q_ERROR;
-
-};
-w25q_status_t w25q_port_receive(void *port_ctx, const w25q_transfer_t *c, uint32_t Timeout){
-
-	assert_param(port_ctx);
-	assert_param(c);
-	assert_param(c->buf);
-	w25q_stm32_port_ctx_t *t = port_ctx;
-
-	w25q_status_t status = w25q_port_send_command(port_ctx, c, Timeout);
-	if(status!=W25Q_OK) return status;
-
-
-	HAL_StatusTypeDef err = HAL_QSPI_Receive(t->hqspi, (uint8_t*)c->buf, Timeout);
-	switch(err)	{
-		case HAL_OK: 		return W25Q_OK;
-		case HAL_TIMEOUT: 	return W25Q_RECEIVE_DATA_TIMEOUT;
-		case HAL_ERROR: 	return W25Q_RECEIVE_DATA_ERROR;
-		case HAL_BUSY: 		return W25Q_RECEIVE_DATA_ERROR;
-	}
-	return W25Q_ERROR;
-}
-
-*/
-
-
 w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint32_t Timeout) {
     assert_param(port_ctx);
     assert_param(c);
@@ -258,9 +203,9 @@ w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint3
 
     // 1) send instruction+address/alt/dummy
     w25q_status_t status = w25q_port_send_command(port_ctx,c,Timeout);
-    if(status != W25Q_OK) return W25Q_OK;
+    if(status != W25Q_OK) return status;
 
-    // 2) decide TX/RX/NONE and Polling path
+    // 2) decide TX/RX/NONE
     if (c->direction == W25Q_XFER_NONE) return W25Q_OK;
 
 
@@ -277,28 +222,30 @@ w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint3
     else {
         // DMA path — port does cache maintenance + starts DMA + returns after waiting
         if (c->direction == W25Q_XFER_TX) {
-            dcache_clean_by_addr((void*)c->buf, c->data_len);
-            W25Q_DMA_startTransfer(); // твоя функция или внутр.флаг
-
-            if (HAL_QSPI_Transmit_DMA(t->hqspi, (uint8_t*)c->buf) != HAL_OK) return W25Q_TRANSMIT_DATA_ERROR;
-        } else {
-            dcache_clean_unaligned_lines_by_addr((void*)c->buf, c->data_len);
-            W25Q_DMA_startTransfer();
-            if (HAL_QSPI_Receive_DMA(t->hqspi, (uint8_t*)c->buf) != HAL_OK) return W25Q_RECEIVE_DATA_ERROR;
+            __dcache_clean_by_addr((void*)c->buf, c->data_len);
+            __DMA_startTransfer();
+            err = HAL_QSPI_Transmit_DMA(t->hqspi, (uint8_t*)c->buf);
+            if (err != HAL_OK) return HAL_ERR_TO_W25QSTATUS(err, DMA_TRANSMIT);
+        } else if(c->direction == W25Q_XFER_RX){
+        	// quite dangerous if you use close data to this buffer in isr or another task!
+            __dcache_clean_unaligned_lines_by_addr((void*)c->buf, c->data_len);
+            __DMA_startTransfer();
+            err = HAL_QSPI_Receive_DMA(t->hqspi, (uint8_t*)c->buf);
+            if (err != HAL_OK) return HAL_ERR_TO_W25QSTATUS(err, DMA_RECEIVE);
         }
-        if (w25q_port_wait_dma(port_ctx, Timeout) != W25Q_OK) return W25Q_DMA_TIMEOUT;
-        if (c->direction == W25Q_XFER_RX) dcache_invalidate_by_addr((void*)c->buf, c->data_len);
+        if (__wait_dma(port_ctx, Timeout) != W25Q_OK) return W25Q_DMA_TIMEOUT;
+        if(c->direction == W25Q_XFER_RX)
+        	__dcache_invalidate_by_addr((void*)c->buf, c->data_len);
+
         return W25Q_OK;
     }
-
-    return W25Q_UNKNOWN_ERROR;
 }
 
 
 
 
 
-w25q_status_t w25q_port_autoPooling(void *port_ctx, const w25q_transfer_t *c, uint8_t wait_msk, uint8_t wait_val, uint32_t Timeout){
+w25q_status_t w25q_port_autoPolling(void *port_ctx, const w25q_transfer_t *c, uint8_t wait_msk, uint8_t wait_val, uint32_t Timeout){
     assert_param(port_ctx);
     assert_param(c);
 	w25q_stm32_port_ctx_t *t = port_ctx;

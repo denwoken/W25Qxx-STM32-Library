@@ -36,6 +36,10 @@
     X(W25Q_RECEIVE_DATA_TIMEOUT)             \
     X(W25Q_POOLING_TIMEOUT)                  \
     X(W25Q_DMA_TIMEOUT)						 \
+	X(W25Q_DMA_TRANSMIT_TIMEOUT)			 \
+	X(W25Q_DMA_RECEIVE_TIMEOUT)				 \
+	X(W25Q_DMA_TRANSMIT_ERROR)			 	 \
+	X(W25Q_DMA_RECEIVE_ERROR)				 \
 	X(W25Q_UNKNOWN_ERROR)
 
 
@@ -48,39 +52,10 @@ typedef enum
 
 #define W25Q_STATUS_TO_STR(s) \
     ((s) < W25Q_UNKNOWN_ERROR + 1 ? w25q_status_str[s] : "W25Q_INVALID_STATUS")
-
-// таблица строк
-static const char *const w25q_status_str[] =
-{
-#define X(name) #name,
-    W25Q_STATUS_LIST(X)
-#undef X
-};
+extern const char *const w25q_status_str[];
 
 
-//
-//typedef enum
-//{
-//  W25Q_OK,
-//
-//  W25Q_UNKNOWN_ERROR,
-//  W25Q_READ_ERROR,
-//  W25Q_WRITE_ERROR,
-//  W25Q_SEND_COMMAND_ERROR,
-//  W25Q_TRANSMIT_DATA_ERROR,
-//  W25Q_RECEIVE_DATA_ERROR,
-//  W25Q_POOLING_ERROR,
-//
-//  W25Q_TIMEOUT,
-//  W25Q_READ_TIMEOUT,
-//  W25Q_WRITE_TIMEOUT,
-//  W25Q_SEND_COMMAND_TIMEOUT,
-//  W25Q_TRANSMIT_DATA_TIMEOUT,
-//  W25Q_RECEIVE_DATA_TIMEOUT,
-//  W25Q_POOLING_TIMEOUT,
-//
-//  W25Q_DMA_TIMEOUT,
-//} w25q_status_t;
+
 #define W25Q_ERR_TIMEOUT(stage) (W25Q_##stage##_TIMEOUT)
 #define W25Q_ERR_ERROR(stage)   (W25Q_##stage##_ERROR)
 
@@ -139,7 +114,7 @@ w25q_status_t W25Q_writeDisable(w25q_flash_handle_t handle);
 
 
 
-w25q_status_t W25Q_PageProgramm(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size);
+w25q_status_t W25Q_PageProgram(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size);
 
 w25q_status_t W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size);
 
@@ -158,7 +133,7 @@ w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t adress, w25q
 
 // fast functions
 
-w25q_status_t W25Q_QuadPageProgramm(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size);
+w25q_status_t W25Q_QuadPageProgram(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size);
 
 
 
@@ -171,7 +146,7 @@ typedef enum {
 	W25Q_FR_MODE_QIO,
 	W25Q_FR_MODE_BEST_AVAILABLE
 }w25q_fr_mode_t;
-HAL_StatusTypeDef W25Q_FastRead(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size, w25q_fr_mode_t mode);
+w25q_status_t W25Q_FastRead(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size, w25q_fr_mode_t mode);
 
 
 

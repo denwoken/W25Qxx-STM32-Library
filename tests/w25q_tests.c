@@ -54,15 +54,15 @@ bool W25Q_Test_ReadWriteStatusReg(w25q_flash_handle_t handle){
 	printf("=== TEST: ReadWrite Status Registers ===\n");
 	w25q_StatusReg1_t sr1 = {0};
 	w25q_StatusReg2_t sr2 = {0};
-	if (W25Q_ReadStatusReg1(handle, &sr1) != HAL_OK) {
-		printf("ERROR: Failed to read Status Register 1\n");
+	if (W25Q_ReadStatusReg1(handle, &sr1) != W25Q_OK) {
+		printf("ERROR: Failed to read Status Register 1: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	printf("SR1 = 0x%02X (BUSY=%d, WEL=%d)\n",
 		   *((uint8_t*)&sr1), sr1.BUSY, sr1.WEL);
 
-	if (W25Q_ReadStatusReg2(handle, &sr2) != HAL_OK) {
-		printf("ERROR: Failed to read Status Register 2\n");
+	if (W25Q_ReadStatusReg2(handle, &sr2) != W25Q_OK) {
+		printf("ERROR: Failed to read Status Register 2: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	printf("SR2 = 0x%02X (QE=%d)\n", *((uint8_t*)&sr2), sr2.QE);
@@ -70,19 +70,19 @@ bool W25Q_Test_ReadWriteStatusReg(w25q_flash_handle_t handle){
 
 	sr2.QE = 1;// Меняем QE = 1
 	w25q_StatusRegs_t regs = { sr1, sr2 };
-	if (W25Q_WriteStatusRegs(handle, &regs) != HAL_OK) {
-		printf("ERROR: Failed to write Status Registers\n");
+	if (W25Q_WriteStatusRegs(handle, &regs) != W25Q_OK) {
+		printf("ERROR: Failed to write Status Registers: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
-	if (W25Q_ReadStatusReg2(handle, &sr2) != HAL_OK) {
-		printf("ERROR: Failed to read SR2 after write\n");
+	if (W25Q_ReadStatusReg2(handle, &sr2) != W25Q_OK) {
+		printf("ERROR: Failed to read SR2 after write: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	printf("After: SR2=0x%02X (QE=%d)\n", *((uint8_t*)&sr2), sr2.QE);
 	if (sr2.QE == 1) {
 		printf("SUCCESS: QE bit successfully set!\n\n");
 	} else {
-		printf("ERROR: QE bit not set correctly!\n\n");
+		printf("ERROR: QE bit not set correctly!: %s\n\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	return false;
@@ -96,15 +96,15 @@ bool W25Q_Test_SectorErase(w25q_flash_handle_t handle){
 
 	// Сначала запишем что-то в сектор (например 0xAA)
 	memset(buf, 0xAA, sizeof(buf));
-	if (W25Q_PageProgramm(handle, testAddr, buf, 256) != HAL_OK) {
-		printf("ERROR: Failed to program page before erase\n");
+	if (W25Q_PageProgram(handle, testAddr, buf, 256) != W25Q_OK) {
+		printf("ERROR: Failed to program page before erase: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 
 	// Читаем и проверяем, что данные действительно записались (не 0xFF)
 	memset(buf, 0, sizeof(buf));
-	if (W25Q_ReadData(handle, testAddr, buf, 256) != HAL_OK) {
-		printf("ERROR: Failed to read data before erase\n");
+	if (W25Q_ReadData(handle, testAddr, buf, 256) != W25Q_OK) {
+		printf("ERROR: Failed to read data before erase: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	if (buf[0] == 0xFF) {
@@ -112,15 +112,15 @@ bool W25Q_Test_SectorErase(w25q_flash_handle_t handle){
 	}
 
 	// Теперь стираем сектор
-	if (W25Q_SectorErase(handle, testAddr, W25Q_SECTOR_TYPE_4K) != HAL_OK) {
-		printf("ERROR: Failed to erase sector at 0x%06lX\n", (unsigned long)testAddr);
+	if (W25Q_SectorErase(handle, testAddr, W25Q_SECTOR_TYPE_4K) != W25Q_OK) {
+		printf("ERROR: Failed to erase sector at 0x%06lX: %s\n", (unsigned long)testAddr, W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 
 	// Читаем весь сектор и проверяем, что все байты = 0xFF
 	memset(buf, 0, sizeof(buf));
-	if (W25Q_ReadData(handle, testAddr, buf, sizeof(buf)) != HAL_OK) {
-		printf("ERROR: Failed to read data after erase\n");
+	if (W25Q_ReadData(handle, testAddr, buf, sizeof(buf)) != W25Q_OK) {
+		printf("ERROR: Failed to read data after erase: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 
@@ -156,8 +156,8 @@ bool W25Q_Test_PageProgramAndRead(w25q_flash_handle_t handle)
     }
     printf("Generated %d random words\n", TEST_DATA_SIZE_32BIT);
 
-    if(W25Q_SectorErase(handle, W25Q_PAGENUM_TO_MEMADDR(0), W25Q_SECTOR_TYPE_32K) != HAL_OK) {
-        printf("ERROR: SectorErase failed at addr=0x%06lX\n", (unsigned long)W25Q_PAGENUM_TO_MEMADDR(0));
+    if(W25Q_SectorErase(handle, W25Q_PAGENUM_TO_MEMADDR(0), W25Q_SECTOR_TYPE_32K) != W25Q_OK) {
+        printf("ERROR: SectorErase failed at addr=0x%06lX: %s\n", (unsigned long)W25Q_PAGENUM_TO_MEMADDR(0), W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
     printf("32k SectorErase done\n");
@@ -172,8 +172,8 @@ bool W25Q_Test_PageProgramAndRead(w25q_flash_handle_t handle)
         if (dataSizeInPage > W25Q_PAGE_SIZE)
             dataSizeInPage = W25Q_PAGE_SIZE;
 
-        if(W25Q_PageProgramm(handle, address, (uint8_t*)InputData + offset, dataSizeInPage) != HAL_OK) {
-            printf("ERROR: PageProgram failed at page %d (addr=0x%06lX)\n", page, (unsigned long)address);
+        if(W25Q_PageProgram(handle, address, (uint8_t*)InputData + offset, dataSizeInPage) != W25Q_OK) {
+            printf("ERROR: PageProgram failed at page %d (addr=0x%06lX): %s\n", page, (unsigned long)address, W25Q_STATUS_TO_STR(handle->lastError));
             return true;
         }
 
@@ -183,8 +183,8 @@ bool W25Q_Test_PageProgramAndRead(w25q_flash_handle_t handle)
         address += dataSizeInPage;
     }
 
-    if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES) != HAL_OK) {
-        printf("ERROR: ReadData failed!\n");
+    if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES) != W25Q_OK) {
+        printf("ERROR: ReadData failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
     printf("Read %d bytes from flash\n", TEST_DATA_SIZE_BYTES);
@@ -210,8 +210,8 @@ bool W25Q_Test_PageProgramMultiPage(w25q_flash_handle_t handle){
 	uint32_t offset  = 0;
 	uint32_t totalSize = 256*64; // 64 страницы
 
-	if(W25Q_SectorErase(handle, address, W25Q_SECTOR_TYPE_32K) != HAL_OK) {
-	    printf("ERROR: W25Q_SectorErase failed!\n");
+	if(W25Q_SectorErase(handle, address, W25Q_SECTOR_TYPE_32K) != W25Q_OK) {
+	    printf("ERROR: W25Q_SectorErase failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 	    return true;
 	}
 
@@ -224,8 +224,8 @@ bool W25Q_Test_PageProgramMultiPage(w25q_flash_handle_t handle){
 
 	while(offset < totalSize) {
 	    uint32_t writeSize = W25Q_PAGE_SIZE;
-	    if(W25Q_PageProgramm(handle, address, (uint8_t*)InputData + offset, writeSize) != HAL_OK) {
-	        printf("ERROR: W25Q_PageProgram failed at addr=0x%06lX\n", (unsigned long)address);
+	    if(W25Q_PageProgram(handle, address, (uint8_t*)InputData + offset, writeSize) != W25Q_OK) {
+	        printf("ERROR: W25Q_PageProgram failed at addr=0x%06lX: %s\n", (unsigned long)address, W25Q_STATUS_TO_STR(handle->lastError));
 	        return true;
 	    }
 	    address += writeSize;
@@ -233,8 +233,8 @@ bool W25Q_Test_PageProgramMultiPage(w25q_flash_handle_t handle){
 	}
 
 	memset(OutputData, 0, totalSize);
-	if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData , totalSize) != HAL_OK) {
-	    printf("ERROR: W25Q_ReadData failed!\n");
+	if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData , totalSize) != W25Q_OK) {
+	    printf("ERROR: W25Q_ReadData failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 	    return true;
 	}
 
@@ -259,24 +259,25 @@ bool W25Q_Test_QuadPageProgram(w25q_flash_handle_t handle) {
     memset(OutputData, 0, sizeof(OutputData));
 
     // 2. Стираем сектор, где будем писать
-    if(W25Q_SectorErase(handle, W25Q_PAGENUM_TO_MEMADDR(0), W25Q_SECTOR_TYPE_4K) != HAL_OK) {
-        printf("ERROR: Sector erase failed!\n");
+    if(W25Q_SectorErase(handle, W25Q_PAGENUM_TO_MEMADDR(0), W25Q_SECTOR_TYPE_4K) != W25Q_OK) {
+        printf("ERROR: Sector erase failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
 
     // 3. Записываем постранично через QuadPageProgramm
     uint32_t address = W25Q_PAGENUM_TO_MEMADDR(0);
     for(uint32_t page = 0; page < TEST_QUAD_PAGES; page++) {
-        if(W25Q_QuadPageProgramm(handle, address, (uint8_t*)InputData + page * W25Q_PAGE_SIZE , W25Q_PAGE_SIZE) != HAL_OK) {
-            printf("ERROR: QuadPageProgram failed at page %lu (addr=0x%06lX)\n", page, (unsigned long)address);
+        if(W25Q_QuadPageProgram(handle, address, (uint8_t*)InputData + page * W25Q_PAGE_SIZE , W25Q_PAGE_SIZE) != W25Q_OK) {
+            printf("ERROR: QuadPageProgram failed at page %lu (addr=0x%06lX): %s\n", page,
+            		(unsigned long)address, W25Q_STATUS_TO_STR(handle->lastError));
             return true;
         }
         address += W25Q_PAGE_SIZE;
     }
 
     // 4. Чтение данных
-    if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData, TEST_QUAD_PAGES * W25Q_PAGE_SIZE) != HAL_OK) {
-        printf("ERROR: ReadData failed!\n");
+    if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData, TEST_QUAD_PAGES * W25Q_PAGE_SIZE) != W25Q_OK) {
+        printf("ERROR: ReadData failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
 
@@ -306,8 +307,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
     memset(OutputData, 0, sizeof(OutputData));
 
     // Стираем сектор
-    if(W25Q_SectorErase(handle, 0, W25Q_SECTOR_TYPE_64K) != HAL_OK) {
-        printf("ERROR: Sector erase failed!\n");
+    if(W25Q_SectorErase(handle, 0, W25Q_SECTOR_TYPE_64K) != W25Q_OK) {
+        printf("ERROR: Sector erase failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
 
@@ -316,8 +317,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
     uint32_t offset = 0;
     while(offset < TEST_DATA_SIZE_BYTES) {
         uint32_t chunk = W25Q_PAGE_SIZE;
-        if(W25Q_PageProgramm(handle, addr, (uint8_t*)InputData + offset, chunk) != HAL_OK) {
-            printf("ERROR: PageProgram failed at addr=0x%06lX\n", (unsigned long)addr);
+        if(W25Q_PageProgram(handle, addr, (uint8_t*)InputData + offset, chunk) != W25Q_OK) {
+            printf("ERROR: PageProgram failed at addr=0x%06lX: %s\n", (unsigned long)addr, W25Q_STATUS_TO_STR(handle->lastError));
             return true;
         }
         addr   += chunk;
@@ -325,8 +326,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
     }
 
 
-    if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_SIO) != HAL_OK) {
-        printf("ERROR: FastRead SIO failed!\n");
+    if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_SIO) != W25Q_OK) {
+        printf("ERROR: FastRead SIO failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
     if(memcmp(InputData, OutputData, TEST_DATA_SIZE_BYTES) != 0) {
@@ -339,8 +340,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
 
     printf("=== TEST: Fast Read (Dual Output) ===\n");
 	memset(OutputData, 0, sizeof(OutputData));
-	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_DO) != HAL_OK) {
-		printf("ERROR: FastRead DO failed!\n");
+	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_DO) != W25Q_OK) {
+		printf("ERROR: FastRead DO failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	if(memcmp(InputData, OutputData, TEST_DATA_SIZE_BYTES) != 0) {
@@ -353,8 +354,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
 
 	printf("=== TEST: Fast Read (Quad Output) ===\n");
 	memset(OutputData, 0, sizeof(OutputData));
-	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_QO) != HAL_OK) {
-		printf("ERROR: FastRead QO failed!\n");
+	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_QO) != W25Q_OK) {
+		printf("ERROR: FastRead QO failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	if(memcmp(InputData, OutputData, TEST_DATA_SIZE_BYTES) != 0) {
@@ -367,8 +368,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
 
 	printf("=== TEST: Fast Read (Dual I/O) ===\n");
 	memset(OutputData, 0, sizeof(OutputData));
-	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_DIO) != HAL_OK) {
-		printf("ERROR: FastRead DIO failed!\n");
+	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_DIO) != W25Q_OK) {
+		printf("ERROR: FastRead DIO failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	if(memcmp(InputData, OutputData, TEST_DATA_SIZE_BYTES) != 0) {
@@ -381,8 +382,8 @@ bool W25Q_Test_FastRead(w25q_flash_handle_t handle) {
 
 	printf("=== TEST: Fast Read (Quad I/O) ===\n");
 	memset(OutputData, 0, sizeof(OutputData));
-	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_QIO) != HAL_OK) {
-		printf("ERROR: FastRead QIO failed!\n");
+	if(W25Q_FastRead(handle, 0, (uint8_t*)OutputData, TEST_DATA_SIZE_BYTES, W25Q_FR_MODE_QIO) != W25Q_OK) {
+		printf("ERROR: FastRead QIO failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
 		return true;
 	}
 	if(memcmp(InputData, OutputData, TEST_DATA_SIZE_BYTES) != 0) {
@@ -460,7 +461,7 @@ static void run_write_bench(w25q_flash_handle_t handle, w25q_benchmark_result_t*
 
     uint32_t start = HAL_GetTick();
     for (uint32_t i = 0; i < size; i += sizeof(buffer)) {
-        W25Q_PageProgramm(handle, address, buffer, sizeof(buffer));
+        W25Q_PageProgram(handle, address, buffer, sizeof(buffer));
         address += sizeof(buffer);
     }
     uint32_t end = HAL_GetTick();
@@ -479,7 +480,7 @@ static void run_quadwrite_bench(w25q_flash_handle_t handle, w25q_benchmark_resul
 
     uint32_t start = HAL_GetTick();
     for (uint32_t i = 0; i < size; i += sizeof(buffer)) {
-        W25Q_QuadPageProgramm(handle, address, buffer, sizeof(buffer));
+        W25Q_QuadPageProgram(handle, address, buffer, sizeof(buffer));
         address += sizeof(buffer);
     }
     uint32_t end = HAL_GetTick();
@@ -559,7 +560,7 @@ static void run_random_write_latency_bench(w25q_flash_handle_t handle, const uin
 
     for (uint32_t i = 0; i < total_ops; i++) {
         uint32_t addr = rand() & address_mask;
-        W25Q_QuadPageProgramm(handle, addr, buffer, write_size);
+        W25Q_QuadPageProgram(handle, addr, buffer, write_size);
     }
 
     uint32_t end = HAL_GetTick();

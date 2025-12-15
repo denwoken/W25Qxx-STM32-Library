@@ -8,82 +8,17 @@
 #include "w25q.h"
 #include <string.h>
 #include "w25q_transfer_level.h"
+#include "w25q_port.h"
 
 
-/*
-volatile bool qspi_done = false;
-void W25Q_DMA_startTransfer(){
-	qspi_done = false;
-}
-
-
-HAL_StatusTypeDef W25Q_DMA_waitTransferComplete(uint32_t Timeout){
-    uint32_t Tickstart = HAL_GetTick();
-
-    while (!qspi_done)
-    {
-        if ((HAL_GetTick() - Tickstart) > Timeout)
-            return HAL_TIMEOUT;
-        __NOP();
-    }
-    return HAL_OK;
-}
-
-void HAL_QSPI_RxCpltCallback(QSPI_HandleTypeDef *hqspi){
-	 qspi_done = true;
-}
-void HAL_QSPI_TxCpltCallback(QSPI_HandleTypeDef *hqspi){
-	 qspi_done = true;
-}
-
-
-static inline void dcache_invalidate_by_addr(void *addr, size_t len)
+// таблица строк
+const char *const w25q_status_str[] =
 {
-    const uint32_t line = 32;
-    const uint32_t lineMsk = (line - 1);
-    uintptr_t start = (uintptr_t)addr & ~lineMsk;
-    size_t  size = ((len + ((uintptr_t)addr & lineMsk) + lineMsk) & ~lineMsk);
+#define X(name) #name,
+    W25Q_STATUS_LIST(X)
+#undef X
+};
 
-    __DSB();
-    if(SCB->CCR & SCB_CCR_DC_Msk)
-    	SCB_InvalidateDCache_by_Addr((uint32_t*)start, size);
-}
-static inline void dcache_clean_by_addr(void *addr, size_t len)
-{
-	const uint32_t line = 32;
-	const uint32_t lineMsk = (line - 1);
-	uintptr_t start = (uintptr_t)addr & ~lineMsk;
-	size_t  size = ((len + ((uintptr_t)addr & lineMsk) + lineMsk) & ~lineMsk);
-    __DSB();
-    if(SCB->CCR & SCB_CCR_DC_Msk)
-    	SCB_CleanDCache_by_Addr((uint32_t*)start, size);
-}
-static inline void dcache_clean_unaligned_lines_by_addr(void *addr, size_t len)
-{
-#if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
-	const uint32_t line = 32;
-	const uint32_t lineMsk = (line - 1);
-
-	__DSB();
-	if(!(SCB->CCR & SCB_CCR_DC_Msk)) return;
-
-    uintptr_t start_line = (uintptr_t)addr & ~lineMsk;
-    uintptr_t end_line   = ((uintptr_t)addr + len - 1) & ~lineMsk;
-
-    //если начало массива не выравнено
-    if ((uintptr_t)addr & lineMsk)
-        SCB->DCCMVAC = start_line;
-
-    //если  конец массива не выравнен
-    if (end_line != start_line && (((uintptr_t)addr + len) & lineMsk))
-        SCB->DCCMVAC = end_line;
-
-	__DSB();
-	__ISB();
-#endif
-}
-
-*/
 
 
 w25q_status_t W25Q_init(w25q_flash_handle_t handle){
@@ -287,8 +222,8 @@ w25q_status_t W25Q_sendCommand(w25q_flash_handle_t handle, uint8_t cmd){
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = cmd;
 	transfer.instr_lines = W25Q_XFER_LINES_1;
-	transfer.addr_lines = W25Q_XFER_NONE;
-	transfer.data_lines = W25Q_XFER_NONE;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_NONE;
 	transfer.direction = W25Q_XFER_NONE;
 
     w25q_status_t status = w25q_port_send_command(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
@@ -306,7 +241,7 @@ w25q_status_t W25Q_writeDisable(w25q_flash_handle_t handle){
 }
 
 
-w25q_status_t W25Q_PageProgramm(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size){
+w25q_status_t W25Q_PageProgram(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size){
 	assert_param(handle);
 	assert_param(data);
     //assert_param(size <= W25Q_PAGE_SIZE);
@@ -398,7 +333,7 @@ w25q_status_t W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t time
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = W25Q_CMD_READ_STATUS_REGISTER_1;
 	transfer.instr_lines = W25Q_XFER_LINES_1;
-	transfer.addr_lines = W25Q_XFER_NONE;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
 	transfer.data_lines = W25Q_XFER_LINES_1;
 	transfer.direction = W25Q_XFER_RX;
 	transfer.data_len = 1;
@@ -406,7 +341,7 @@ w25q_status_t W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t time
 	w25q_StatusReg1_t StatusRegMsk = {0};
 	StatusRegMsk.BUSY = 1; // looking only busy flag
 
-    w25q_status_t status = w25q_port_autoPooling(handle->port_ctx, &transfer, StatusRegMsk.raw, 0, timeout);
+    w25q_status_t status = w25q_port_autoPolling(handle->port_ctx, &transfer, StatusRegMsk.raw, 0, timeout);
     if(status != W25Q_OK) handle->lastError = status;
     return status;
 
@@ -432,22 +367,22 @@ w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25
 	case W25Q_SECTOR_TYPE_4K:
 		transfer.instruction = W25Q_CMD_SECTOR_ERASE_4KB;
 		transfer.addr_lines = W25Q_XFER_LINES_1;
-		timeout = 400;
+		timeout = W25Q_ERASE_4K_TIMEOUT_MS;
 		break;
 	case W25Q_SECTOR_TYPE_32K:
 		transfer.instruction = W25Q_CMD_BLOCK_ERASE_32KB;
 		transfer.addr_lines = W25Q_XFER_LINES_1;
-		timeout = 800;
+		timeout = W25Q_ERASE_32K_TIMEOUT_MS;
 		break;
 	case W25Q_SECTOR_TYPE_64K:
 		transfer.instruction = W25Q_CMD_BLOCK_ERASE_64KB;
 		transfer.addr_lines = W25Q_XFER_LINES_1;
-		timeout = 1000;
+		timeout = W25Q_ERASE_64K_TIMEOUT_MS;
 		break;
 	case W25Q_SECTOR_TYPE_ALLCHIP:
 		transfer.instruction = W25Q_CMD_CHIP_ERASE;
 		transfer.addr_lines = W25Q_XFER_LINES_NONE;
-		timeout = 15000;
+		timeout = W25Q_ERASE_FULL_TIMEOUT_MS;
 		break;
 	}
 
@@ -471,7 +406,7 @@ w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25
 // fast functions
 
 
-w25q_status_t W25Q_QuadPageProgramm(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
+w25q_status_t W25Q_QuadPageProgram(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
 
 	assert_param(handle);
 	assert_param(data);
@@ -518,7 +453,7 @@ w25q_status_t W25Q_QuadPageProgramm(w25q_flash_handle_t handle, uint32_t address
 
 
 
-HAL_StatusTypeDef W25Q_FastRead(w25q_flash_handle_t handle,
+w25q_status_t W25Q_FastRead(w25q_flash_handle_t handle,
 								uint32_t address,
 								uint8_t* data,
 								uint32_t size,
@@ -595,12 +530,8 @@ HAL_StatusTypeDef W25Q_FastRead(w25q_flash_handle_t handle,
 
 
     status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
-    if(status != W25Q_OK) {
-    	handle->lastError = status;
-    	return status;
-    }
-
-
+    if(status != W25Q_OK) handle->lastError = status;
+    return status;
 }
 
 
