@@ -21,37 +21,74 @@ const char *const w25q_status_str[] =
 
 
 
-w25q_status_t W25Q_init(w25q_flash_handle_t handle){
-	assert_param(handle);
-	assert_param(handle->hqspi);
 
-	uint32_t qspi_clk = HAL_RCC_GetHCLKFreq();
-	uint32_t prescaler = handle->hqspi->Init.ClockPrescaler + 1;
-	handle->flash_freq = qspi_clk / prescaler;
+w25q_status_t W25Q_init(w25q_flash_handle_t handle)
+{
+    W25Q_ASSERT(handle);
+    W25Q_ASSERT(handle->port_ctx);
 
-	w25q_status_t status = W25Q_ReadInfo(handle, &handle->info);
-	if(status != W25Q_OK) return status;
+    w25q_status_t status;
+    uint32_t prev_clk;
 
-	if(handle->info.Capacity == 0 ) return W25Q_UNKNOWN_ERROR;
-	if(handle->info.MemoryType == 0 ) return W25Q_UNKNOWN_ERROR;
-	if(handle->info.Manufacturer == 0 ) return W25Q_UNKNOWN_ERROR;
-	uint32_t* uuid = (uint32_t*)handle->info.uuid;
-	if((uuid[0] | uuid[1]) == 0) return W25Q_UNKNOWN_ERROR;
+    // --- HW init (port layer) ---
+    if (!w25q_port_is_initialized_hw(handle->port_ctx)) {
+        status = w25q_port_initialize_hw(handle->port_ctx);
+        if (status != W25Q_OK) return status;
+    }
+
+    // --- Save current clock & switch to safe ---
+    prev_clk = W25Q_getCLK(handle);
+    handle->flash_freq = prev_clk;
+    status = W25Q_setCLK(handle, W25Q_SAFE_INIT_CLK_HZ);
+    if (status != W25Q_OK) return status;
+
+    // --- Read JEDEC / device info ---
+    status = W25Q_ReadInfo(handle, &handle->info);
 
 
-//	if(handle->hqspi->hdma){
-//
-//	}
+    // --- Restore clock regardless of result ---
+    W25Q_setCLK(handle, prev_clk);
 
+    if (status != W25Q_OK) return status;
 
+    // --- Validate device ---
+    if (handle->info.Manufacturer == 0x00 ||
+        handle->info.MemoryType  == 0x00 ||
+        handle->info.Capacity    == 0x00)
+    {
+        return W25Q_UNKNOWN_ERROR;
+    }
 
+    const uint32_t *uuid = (const uint32_t *)handle->info.uuid;
+    if ((uuid[0] | uuid[1]) == 0)
+        return W25Q_UNKNOWN_ERROR;
+
+    handle->initialized = true;
+
+    return W25Q_OK;
+}
+
+bool W25Q_isDMAenabled(w25q_flash_handle_t handle){
+	W25Q_ASSERT(handle);
+	return w25q_port_is_DMA_enabled(handle->port_ctx);
+}
+uint32_t W25Q_getCLK(w25q_flash_handle_t handle){
+	W25Q_ASSERT(handle);
+	return w25q_port_getCLK(handle->port_ctx);
+}
+w25q_status_t W25Q_setCLK(w25q_flash_handle_t handle, uint32_t clk){
+	W25Q_ASSERT(handle);
+	w25q_status_t status;
+	status = w25q_port_setCLK(handle->port_ctx, clk);
+	if(status != W25Q_OK) handle->lastError = status;
 	return status;
 }
 
 
+
 w25q_status_t W25Q_ReadInfo(w25q_flash_handle_t handle, w25q_info_t* info){
-	assert_param(handle);
-	assert_param(info);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(info);
 
 	memset(info, 0, sizeof(w25q_info_t));
 
@@ -64,6 +101,7 @@ w25q_status_t W25Q_ReadInfo(w25q_flash_handle_t handle, w25q_info_t* info){
 	info->Manufacturer = id[0];
 	info->MemoryType = id[1];
 	info->Capacity = id[2];
+	info->CapacityBytes = (1UL << info->Capacity);
 
 	status = W25Q_ReadUUID(handle, info->uuid);
 	return status;
@@ -73,8 +111,8 @@ w25q_status_t W25Q_ReadInfo(w25q_flash_handle_t handle, w25q_info_t* info){
 
 w25q_status_t W25Q_ReadID(w25q_flash_handle_t handle, uint8_t *id)
 {
-	assert_param(handle);
-	assert_param(id);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(id);
 
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = W25Q_CMD_JEDEC_ID;
@@ -85,19 +123,27 @@ w25q_status_t W25Q_ReadID(w25q_flash_handle_t handle, uint8_t *id)
 	transfer.data_len = 3;
 	transfer.buf = id;
 
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (3>=DMA_THRESHOLD);
+#endif
 
     w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
     if(status != W25Q_OK) {
     	handle->lastError = status;
     	return status;
     }
+
+    /* basic validation */
+    if (id[0] == 0x00 || id[0] == 0xFF)
+    	status = W25Q_INVALID_DEVICE;
+
     return status;
 
 }
 w25q_status_t W25Q_ReadUUID(w25q_flash_handle_t handle, uint8_t *id){
 
-	assert_param(handle);
-	assert_param(id);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(id);
 
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = W25Q_CMD_READ_UNIQUE_ID;
@@ -111,11 +157,14 @@ w25q_status_t W25Q_ReadUUID(w25q_flash_handle_t handle, uint8_t *id){
 	transfer.alt_data = 0;
 	transfer.alt_lines = W25Q_XFER_LINES_1;
 
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (8>=DMA_THRESHOLD);
+#endif
+
     w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
-    if(status != W25Q_OK) {
+    if(status != W25Q_OK)
     	handle->lastError = status;
-    	return status;
-    }
+
     return status;
 }
 
@@ -123,7 +172,7 @@ w25q_status_t W25Q_ReadUUID(w25q_flash_handle_t handle, uint8_t *id){
 
 
 w25q_status_t W25Q_ReadStatusReg1(w25q_flash_handle_t handle, w25q_StatusReg1_t* reg){
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = W25Q_CMD_READ_STATUS_REGISTER_1;
@@ -146,7 +195,7 @@ w25q_status_t W25Q_ReadStatusReg1(w25q_flash_handle_t handle, w25q_StatusReg1_t*
 
 }
 w25q_status_t W25Q_ReadStatusReg2(w25q_flash_handle_t handle, w25q_StatusReg2_t* reg){
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 
 
 	w25q_transfer_t transfer = {0};
@@ -172,8 +221,8 @@ w25q_status_t W25Q_ReadStatusReg2(w25q_flash_handle_t handle, w25q_StatusReg2_t*
 }
 
 w25q_status_t W25Q_WriteStatusRegs(w25q_flash_handle_t handle, w25q_StatusRegs_t* regs){
-	assert_param(handle);
-	assert_param(regs);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(regs);
 
 	w25q_status_t status;
 	status = W25Q_writeEnable(handle);
@@ -200,7 +249,7 @@ w25q_status_t W25Q_WriteStatusRegs(w25q_flash_handle_t handle, w25q_StatusRegs_t
 
 
 w25q_status_t W25Q_UpdateSatatus(w25q_flash_handle_t handle){
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 
 	w25q_status_t status;
 	status = W25Q_ReadStatusReg1(handle, NULL);
@@ -218,7 +267,7 @@ w25q_status_t W25Q_UpdateSatatus(w25q_flash_handle_t handle){
 
 
 w25q_status_t W25Q_sendCommand(w25q_flash_handle_t handle, uint8_t cmd){
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = cmd;
 	transfer.instr_lines = W25Q_XFER_LINES_1;
@@ -233,7 +282,6 @@ w25q_status_t W25Q_sendCommand(w25q_flash_handle_t handle, uint8_t cmd){
 }
 
 w25q_status_t W25Q_writeEnable(w25q_flash_handle_t handle){
-
 	return W25Q_sendCommand(handle, W25Q_CMD_WRITE_ENABLE );
 }
 w25q_status_t W25Q_writeDisable(w25q_flash_handle_t handle){
@@ -242,10 +290,10 @@ w25q_status_t W25Q_writeDisable(w25q_flash_handle_t handle){
 
 
 w25q_status_t W25Q_PageProgram(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size){
-	assert_param(handle);
-	assert_param(data);
-    //assert_param(size <= W25Q_PAGE_SIZE);
-    //assert_param(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+    //W25Q_ASSERT(size <= W25Q_PAGE_SIZE);
+    //W25Q_ASSERT(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
 
 	w25q_status_t status;
 	status = W25Q_writeEnable(handle);
@@ -265,6 +313,9 @@ w25q_status_t W25Q_PageProgram(w25q_flash_handle_t handle, uint32_t adress, uint
 	transfer.data_len = size;
 	transfer.buf = data;
 
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
     status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
     if(status != W25Q_OK) {
     	handle->lastError = status;
@@ -280,13 +331,13 @@ w25q_status_t W25Q_PageProgram(w25q_flash_handle_t handle, uint32_t adress, uint
 
 
 w25q_status_t W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
-	assert_param(handle);
-	assert_param(data);
-    assert_param(address < W25Q_HIGH_ADDRESS);
-    assert_param((address + size) <= W25Q_HIGH_ADDRESS);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+    W25Q_ASSERT(address < W25Q_HIGH_ADDRESS);
+    W25Q_ASSERT((address + size) <= W25Q_HIGH_ADDRESS);
 
 
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = W25Q_CMD_READ_DATA;
 	transfer.instr_lines = W25Q_XFER_LINES_1;
@@ -298,6 +349,10 @@ w25q_status_t W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_
 	transfer.data_len = size;
 	transfer.buf = data;
 	transfer.direction = W25Q_XFER_RX;
+
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
 
     w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
     if(status != W25Q_OK) {
@@ -329,7 +384,7 @@ w25q_status_t W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_
 
 w25q_status_t W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t timeout){
 
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 	w25q_transfer_t transfer = {0};
 	transfer.instruction = W25Q_CMD_READ_STATUS_REGISTER_1;
 	transfer.instr_lines = W25Q_XFER_LINES_1;
@@ -341,15 +396,15 @@ w25q_status_t W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t time
 	w25q_StatusReg1_t StatusRegMsk = {0};
 	StatusRegMsk.BUSY = 1; // looking only busy flag
 
-    w25q_status_t status = w25q_port_autoPolling(handle->port_ctx, &transfer, StatusRegMsk.raw, 0, timeout);
+    w25q_status_t status = w25q_port_autoPolling(handle, &transfer, StatusRegMsk.raw, 0, timeout);
     if(status != W25Q_OK) handle->lastError = status;
     return status;
 
 }
 
 w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25q_sector_t sector){
-	assert_param(handle);
-    assert_param(address < W25Q_HIGH_ADDRESS);
+	W25Q_ASSERT(handle);
+    W25Q_ASSERT(address < W25Q_HIGH_ADDRESS);
 
 
 	w25q_status_t status;
@@ -357,7 +412,7 @@ w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25
 	if(status != W25Q_OK) return status;
 
 
-	assert_param(handle);
+	W25Q_ASSERT(handle);
 	w25q_transfer_t transfer = {0};
 	transfer.instr_lines = W25Q_XFER_LINES_1;
 	transfer.addr_bits = W25Q_XFER_BITS_24;
@@ -408,10 +463,10 @@ w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25
 
 w25q_status_t W25Q_QuadPageProgram(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
 
-	assert_param(handle);
-	assert_param(data);
-//    assert_param(size <= W25Q_PAGE_SIZE);
-//    assert_param(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+//    W25Q_ASSERT(size <= W25Q_PAGE_SIZE);
+//    W25Q_ASSERT(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
 
 	w25q_status_t status;
 	status = W25Q_writeEnable(handle);
@@ -440,6 +495,10 @@ w25q_status_t W25Q_QuadPageProgram(w25q_flash_handle_t handle, uint32_t address,
 	transfer.buf = data;
 	transfer.direction = W25Q_XFER_TX;
 
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
+
     status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
     if(status != W25Q_OK) {
     	handle->lastError = status;
@@ -459,9 +518,9 @@ w25q_status_t W25Q_FastRead(w25q_flash_handle_t handle,
 								uint32_t size,
 								w25q_fr_mode_t mode)
 {
-	assert_param(handle);
-	assert_param(data);
-//    assert_param(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+//    W25Q_ASSERT(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
 
 
     if(mode == W25Q_FR_MODE_BEST_AVAILABLE)
@@ -489,6 +548,9 @@ w25q_status_t W25Q_FastRead(w25q_flash_handle_t handle,
 	transfer.buf = data;
 	transfer.direction = W25Q_XFER_RX;
 
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
 
     switch(mode){
     case W25Q_FR_MODE_DO:

@@ -13,11 +13,13 @@
 #include "w25q_config.h"
 
 
-#include "stm32f7xx_hal.h"
-#include "stm32f7xx_hal_qspi.h"
 
-
-
+#if ASSERT_IMPLEMENTATION == 0
+#define W25Q_ASSERT(expr) ((void)0U)
+#elif ASSERT_IMPLEMENTATION == 1
+#define W25Q_ASSERT(expr) assert_param(expr)
+#elif ASSERT_IMPLEMENTATION == 2
+#endif
 
 
 #define W25Q_STATUS_LIST(X)                  \
@@ -40,6 +42,10 @@
 	X(W25Q_DMA_RECEIVE_TIMEOUT)				 \
 	X(W25Q_DMA_TRANSMIT_ERROR)			 	 \
 	X(W25Q_DMA_RECEIVE_ERROR)				 \
+	X(W25Q_HW_ERROR)				 		 \
+	X(W25Q_INVALID_ARG)				 		 \
+	X(W25Q_NO_IMPLEMENTATION_ERROR)			 \
+	X(W25Q_INVALID_DEVICE)			 		 \
 	X(W25Q_UNKNOWN_ERROR)
 
 
@@ -65,6 +71,7 @@ typedef struct{
 	uint8_t Manufacturer;
 	uint8_t MemoryType;
 	uint8_t Capacity;
+	uint32_t CapacityBytes;
 
 	uint8_t uuid[8];
 
@@ -72,7 +79,6 @@ typedef struct{
 
 typedef struct
 {
-	QSPI_HandleTypeDef *hqspi;
 	void *port_ctx;
 	w25q_status_t lastError;
 	w25q_info_t info;
@@ -81,13 +87,16 @@ typedef struct
 	bool isCachedStatusReg2Valid;
 
 	uint32_t flash_freq;
+	bool initialized;
 
 }w25q_flash_t;
 typedef w25q_flash_t* w25q_flash_handle_t;
 
 w25q_status_t W25Q_init(w25q_flash_handle_t handle);
 
-
+bool W25Q_isDMAenabled(w25q_flash_handle_t handle);
+uint32_t W25Q_getCLK(w25q_flash_handle_t handle);
+w25q_status_t W25Q_setCLK(w25q_flash_handle_t handle, uint32_t clk);
 
 w25q_status_t W25Q_ReadInfo(w25q_flash_handle_t handle, w25q_info_t* info);
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "w25q.h"
+#include <stdbool.h>
 
 
 typedef enum {
@@ -49,10 +51,9 @@ typedef struct {
     void *buf;
     uint32_t data_len;
 
+    bool prefer_dma;
+
 } w25q_transfer_t;
-
-
-
 
 
 

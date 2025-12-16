@@ -590,7 +590,7 @@ void W25Q_RunAllBenchMark(w25q_flash_handle_t handle) {
 
 
     printf("=== W25Q Benchmarks ===  SCLK = %2.2f MHz; buffferSize = %d B; DMA = %s\n",
-    		handle->flash_freq/1000000.0, buffferSize, (handle->hqspi->hdma)?"true":"false");
+    		W25Q_getCLK(handle)/1000000.0, buffferSize, (W25Q_isDMAenabled(handle))?"true":"false");
 
     // === WRITE ===
 	run_write_bench(handle, &results[resultInc++]);

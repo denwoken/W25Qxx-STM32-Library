@@ -10,6 +10,10 @@
 #include "w25q_transfer_level.h"
 
 
+
+
+
+#if USE_STM32_PORT_F7 == 1
 // cache specific functions; works only when Data cache enabled
 void __dcache_clean_by_addr(void *addr, size_t len){
 #if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
@@ -58,8 +62,6 @@ void __dcache_clean_unaligned_lines_by_addr(void *addr, size_t len){
 	__ISB();
 #endif
 }
-
-
 
 
 // convert transfer level enums to HAL types
@@ -148,12 +150,6 @@ static QSPI_CommandTypeDef build_qspi_cmd(const w25q_transfer_t *c)
 
 
 
-
-
-
-
-
-
 // functions specific for dma use
 __IO bool qspi_done = false;
 static void __DMA_startTransfer(){
@@ -182,11 +178,67 @@ void HAL_QSPI_TxCpltCallback(QSPI_HandleTypeDef *hqspi){
 
 
 
+w25q_status_t w25q_port_initialize_hw(void* port_ctx){
+	W25Q_ASSERT(port_ctx);
+	w25q_stm32_port_ctx_t *ctx = port_ctx;
+	if (HAL_QSPI_Init(ctx->hqspi) != HAL_OK)
+	    return W25Q_HW_ERROR;
+	return W25Q_OK;
+}
+w25q_status_t w25q_port_deinitialize_hw(void* port_ctx){
+	W25Q_ASSERT(port_ctx);
+	w25q_stm32_port_ctx_t *ctx = port_ctx;
+	if (HAL_QSPI_DeInit(ctx->hqspi) != HAL_OK)
+	    return W25Q_HW_ERROR;
+	return W25Q_OK;
+}
+bool w25q_port_is_DMA_enabled(void* port_ctx){
+	W25Q_ASSERT(port_ctx);
+	w25q_stm32_port_ctx_t *ctx = port_ctx;
+	return ctx->hqspi->hdma;
+}
+bool w25q_port_is_initialized_hw(void* port_ctx){
+	W25Q_ASSERT(port_ctx);
+	w25q_stm32_port_ctx_t *ctx = port_ctx;
 
 
-w25q_status_t w25q_port_send_command(void *port_ctx, const w25q_transfer_t *c, uint32_t Timeout){
-	assert_param(port_ctx);
-	assert_param(c);
+	return (ctx->hqspi->State != HAL_QSPI_STATE_RESET);
+}
+
+uint32_t w25q_port_getCLK(void* port_ctx)
+{
+	W25Q_ASSERT(port_ctx);
+    w25q_stm32_port_ctx_t *ctx = port_ctx;
+
+    return HAL_RCC_GetHCLKFreq() / (ctx->hqspi->Init.ClockPrescaler+1);
+}
+
+w25q_status_t w25q_port_setCLK(void* port_ctx, uint32_t target_hz)
+{
+	W25Q_ASSERT(port_ctx);
+
+    w25q_stm32_port_ctx_t *ctx = port_ctx;
+
+    uint32_t prescaler = (HAL_RCC_GetHCLKFreq() + target_hz - 1) / target_hz;
+    if (prescaler == 0 || prescaler > 256)
+        return W25Q_INVALID_ARG;
+
+    ctx->hqspi->Init.ClockPrescaler = prescaler - 1;
+
+    w25q_status_t st;
+    st = w25q_port_deinitialize_hw(port_ctx);
+    if(st !=  W25Q_OK) return st;
+    st = w25q_port_initialize_hw(port_ctx);
+    if(st !=  W25Q_OK) return st;
+
+    return W25Q_OK;
+}
+
+
+
+w25q_status_t w25q_port_send_command(void* port_ctx, const w25q_transfer_t *c, uint32_t Timeout){
+	W25Q_ASSERT(port_ctx);
+	W25Q_ASSERT(c);
 	w25q_stm32_port_ctx_t *t = port_ctx;
 
 	QSPI_CommandTypeDef sCommand = build_qspi_cmd(c);
@@ -195,9 +247,10 @@ w25q_status_t w25q_port_send_command(void *port_ctx, const w25q_transfer_t *c, u
 	return W25Q_OK;
 }
 
-w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint32_t Timeout) {
-    assert_param(port_ctx);
-    assert_param(c);
+w25q_status_t w25q_port_transfer(void* port_ctx, const w25q_transfer_t *c, uint32_t Timeout) {
+
+	W25Q_ASSERT(port_ctx);
+    W25Q_ASSERT(c);
     w25q_stm32_port_ctx_t *t = port_ctx;
     HAL_StatusTypeDef err;
 
@@ -209,7 +262,7 @@ w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint3
     if (c->direction == W25Q_XFER_NONE) return W25Q_OK;
 
 
-    if (t->hqspi->hdma == NULL ) {//|| !should_use_dma(t, c)
+    if (t->hqspi->hdma == NULL || c->prefer_dma == false) {
         if (c->direction == W25Q_XFER_TX) {
         	err = HAL_QSPI_Transmit(t->hqspi, (uint8_t*)c->buf, Timeout);
             if (err != HAL_OK) return HAL_ERR_TO_W25QSTATUS(err, TRANSMIT_DATA);
@@ -241,13 +294,10 @@ w25q_status_t w25q_port_transfer(void *port_ctx, const w25q_transfer_t *c, uint3
     }
 }
 
+w25q_status_t w25q_port_autoPolling(void* port_ctx, const w25q_transfer_t *c, uint8_t wait_msk, uint8_t wait_val, uint32_t Timeout){
 
-
-
-
-w25q_status_t w25q_port_autoPolling(void *port_ctx, const w25q_transfer_t *c, uint8_t wait_msk, uint8_t wait_val, uint32_t Timeout){
-    assert_param(port_ctx);
-    assert_param(c);
+	W25Q_ASSERT(port_ctx);
+    W25Q_ASSERT(c);
 	w25q_stm32_port_ctx_t *t = port_ctx;
 
 	QSPI_CommandTypeDef sCommand = build_qspi_cmd(c);
@@ -268,7 +318,43 @@ w25q_status_t w25q_port_autoPolling(void *port_ctx, const w25q_transfer_t *c, ui
 }
 
 
+#elif USE_CUSTOM_PORT
 
+
+__weak w25q_status_t w25q_port_initialize_hw(void* port_ctx){
+
+	 return W25Q_NO_IMPLEMENTATION_ERROR;
+}
+__weak w25q_status_t w25q_port_deinitialize_hw(void* port_ctx){
+	return W25Q_NO_IMPLEMENTATION_ERROR;
+}
+bool w25q_port_is_DMA_enabled(void* port_ctx){
+	return false;
+}
+bool w25q_port_is_initialized_hw(void* port_ctx){
+	return false;
+}
+__weak uint32_t w25q_port_getCLK(void* port_ctx){
+	return 0;
+}
+__weak w25q_status_t w25q_port_setCLK(void* port_ctx, uint32_t target_hz){
+	return W25Q_NO_IMPLEMENTATION_ERROR;
+}
+
+__weak w25q_status_t w25q_port_send_command(void* port_ctx, const w25q_transfer_t *c, uint32_t Timeout){
+	return W25Q_NO_IMPLEMENTATION_ERROR;
+}
+
+__weak w25q_status_t w25q_port_transfer(void* port_ctx, const w25q_transfer_t *c, uint32_t Timeout){
+	return W25Q_NO_IMPLEMENTATION_ERROR;
+}
+__weak w25q_status_t w25q_port_autoPolling(void* port_ctx, const w25q_transfer_t *c, uint8_t wait_msk, uint8_t wait_val, uint32_t Timeout){
+	return W25Q_NO_IMPLEMENTATION_ERROR;
+}
+
+
+
+#endif
 
 
 
