@@ -4,6 +4,17 @@ STM32 driver for Winbond W25Q serial NOR flash focused on `STM32F7 + HAL QSPI`.
 
 The library exposes a compact high-level API for initialization, JEDEC/UUID readout, status register handling, page program, erase, and fast-read modes. The included STM32F7 port also supports DMA transfers and Cortex-M7 D-Cache maintenance for higher throughput.
 
+## Why This Project Matters
+
+This project is more than a thin wrapper around W25Q commands. It targets the parts that are usually painful in real embedded systems work:
+
+- combining `STM32F7 QSPI`, `DMA`, and `D-Cache` without breaking data coherency
+- supporting multiple read paths (`SIO`, `DO`, `QO`, `DIO`, `QIO`) and quad-write flows
+- handling flash-specific details such as `QE`, status polling, erase/program timing, and safe clock changes during initialization
+- validating the implementation on real hardware instead of stopping at a compile-only driver
+
+The result is a driver that was benchmarked on `NUCLEO-144 STM32F767` at `72 MHz`, reaching up to `26.316 MB/s` in `QIO + DMA + cache` mode.
+
 ## Features
 
 - JEDEC ID and 64-bit unique ID readout
@@ -174,4 +185,3 @@ Takeaways:
 - Quad operations automatically ensure the `QE` bit is set before use.
 - If you enable `USE_CUSTOM_PORT`, you must implement the `w25q_port_*()` functions yourself.
 - The current codebase uses 24-bit addressing; if you target larger parts or 4-byte address mode, review the address limits first.
-
