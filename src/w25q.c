@@ -344,6 +344,7 @@ w25q_status_t W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_
 
 	transfer.addr_lines = W25Q_XFER_LINES_1;
 	transfer.addr_bits = W25Q_XFER_BITS_24;
+	transfer.address = address;
 
 	transfer.data_lines = W25Q_XFER_LINES_1;
 	transfer.data_len = size;
@@ -396,7 +397,7 @@ w25q_status_t W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t time
 	w25q_StatusReg1_t StatusRegMsk = {0};
 	StatusRegMsk.BUSY = 1; // looking only busy flag
 
-    w25q_status_t status = w25q_port_autoPolling(handle, &transfer, StatusRegMsk.raw, 0, timeout);
+    w25q_status_t status = w25q_port_autoPolling(handle->port_ctx, &transfer, StatusRegMsk.raw, 0, timeout);
     if(status != W25Q_OK) handle->lastError = status;
     return status;
 
@@ -416,6 +417,7 @@ w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25
 	w25q_transfer_t transfer = {0};
 	transfer.instr_lines = W25Q_XFER_LINES_1;
 	transfer.addr_bits = W25Q_XFER_BITS_24;
+	transfer.address = address;
 
 	uint32_t timeout = 0;
 	switch(sector){
@@ -489,6 +491,7 @@ w25q_status_t W25Q_QuadPageProgram(w25q_flash_handle_t handle, uint32_t address,
 
 	transfer.addr_lines = W25Q_XFER_LINES_1;
 	transfer.addr_bits = W25Q_XFER_BITS_24;
+	transfer.address = address;
 
 	transfer.data_lines = W25Q_XFER_LINES_4;
 	transfer.data_len = size;
@@ -547,6 +550,7 @@ w25q_status_t W25Q_FastRead(w25q_flash_handle_t handle,
 	transfer.data_len = size;
 	transfer.buf = data;
 	transfer.direction = W25Q_XFER_RX;
+	transfer.address = address;
 
 #if DMA_ENABLE==1
 	transfer.prefer_dma = (size>=DMA_THRESHOLD);

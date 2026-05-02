@@ -8,7 +8,7 @@
 
 
 
-#define DMA_ENABLE 1
+#define DMA_ENABLE 0
 #define DMA_THRESHOLD 32
 
 #define W25Q_SAFE_INIT_CLK_HZ   (1000000UL)

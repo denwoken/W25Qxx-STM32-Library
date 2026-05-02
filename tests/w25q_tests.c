@@ -251,6 +251,7 @@ bool W25Q_Test_PageProgramMultiPage(w25q_flash_handle_t handle){
 bool W25Q_Test_QuadPageProgram(w25q_flash_handle_t handle) {
 	assert_param(handle);
     printf("=== TEST: Quad Page Program ===\n");
+    uint16_t firstPage = 0;
 
     // 1. Подготовка тестовых данных
     for(uint32_t i = 0; i < TEST_QUAD_PAGES * W25Q_PAGE_SIZE; i++) {
@@ -259,34 +260,35 @@ bool W25Q_Test_QuadPageProgram(w25q_flash_handle_t handle) {
     memset(OutputData, 0, sizeof(OutputData));
 
     // 2. Стираем сектор, где будем писать
-    if(W25Q_SectorErase(handle, W25Q_PAGENUM_TO_MEMADDR(0), W25Q_SECTOR_TYPE_4K) != W25Q_OK) {
+    if(W25Q_SectorErase(handle, W25Q_PAGENUM_TO_MEMADDR(firstPage), W25Q_SECTOR_TYPE_4K) != W25Q_OK) {
         printf("ERROR: Sector erase failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
 
     // 3. Записываем постранично через QuadPageProgramm
-    uint32_t address = W25Q_PAGENUM_TO_MEMADDR(0);
+    uint32_t address = W25Q_PAGENUM_TO_MEMADDR(firstPage);
     for(uint32_t page = 0; page < TEST_QUAD_PAGES; page++) {
         if(W25Q_QuadPageProgram(handle, address, (uint8_t*)InputData + page * W25Q_PAGE_SIZE , W25Q_PAGE_SIZE) != W25Q_OK) {
             printf("ERROR: QuadPageProgram failed at page %lu (addr=0x%06lX): %s\n", page,
             		(unsigned long)address, W25Q_STATUS_TO_STR(handle->lastError));
             return true;
         }
+        HAL_Delay(1);
         address += W25Q_PAGE_SIZE;
     }
 
     // 4. Чтение данных
-    if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(0), (uint8_t*)OutputData, TEST_QUAD_PAGES * W25Q_PAGE_SIZE) != W25Q_OK) {
+    if(W25Q_ReadData(handle, W25Q_PAGENUM_TO_MEMADDR(firstPage), (uint8_t*)OutputData, TEST_QUAD_PAGES * W25Q_PAGE_SIZE) != W25Q_OK) {
         printf("ERROR: ReadData failed!: %s\n", W25Q_STATUS_TO_STR(handle->lastError));
         return true;
     }
 
     // 5. Сравнение
-    if(memcmp((void*)InputData, (void*)OutputData, TEST_QUAD_PAGES) != 0) {
+    if(memcmp((void*)InputData, (void*)OutputData, TEST_QUAD_PAGES*W25Q_PAGE_SIZE) != 0) {
         printf("ERROR: Data mismatch!\n");
 
-        for(int i = 0; i < 32; i++) {
-            printf("[%06d] In=0x%02lX Out=0x%02lX\n", i, InputData[i], OutputData[i]);
+        for(int i = 0; i < TEST_QUAD_PAGES*W25Q_PAGE_SIZE; i++) {
+            printf("[%06d] In=0x%02X Out=0x%02X\n", i, (unsigned)InputData[i], (unsigned)OutputData[i]);
         }
         return true;
     }
