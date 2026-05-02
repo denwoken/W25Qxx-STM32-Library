@@ -4,575 +4,453 @@
  *  Created on: Oct 3, 2025
  *      Author: denwoken
  */
+#include "w25q_registers.h"
 #include "w25q.h"
 #include <string.h>
+#include "w25q_transfer_level.h"
+#include "w25q_port.h"
 
 
-volatile bool qspi_done = false;
-void W25Q_DMA_startTransfer(){
-	qspi_done = false;
-}
+// таблица строк
+const char *const w25q_status_str[] =
+{
+#define X(name) #name,
+    W25Q_STATUS_LIST(X)
+#undef X
+};
 
 
-HAL_StatusTypeDef W25Q_DMA_waitTransferComplete(uint32_t Timeout){
-    uint32_t Tickstart = HAL_GetTick();
 
-    while (!qspi_done)
-    {
-        if ((HAL_GetTick() - Tickstart) > Timeout)
-            return HAL_TIMEOUT;
-        __NOP();
+
+w25q_status_t W25Q_init(w25q_flash_handle_t handle)
+{
+    W25Q_ASSERT(handle);
+    W25Q_ASSERT(handle->port_ctx);
+
+    w25q_status_t status;
+    uint32_t prev_clk;
+
+    // --- HW init (port layer) ---
+    if (!w25q_port_is_initialized_hw(handle->port_ctx)) {
+        status = w25q_port_initialize_hw(handle->port_ctx);
+        if (status != W25Q_OK) return status;
     }
-    return HAL_OK;
+
+    // --- Save current clock & switch to safe ---
+    prev_clk = W25Q_getCLK(handle);
+    handle->flash_freq = prev_clk;
+    status = W25Q_setCLK(handle, W25Q_SAFE_INIT_CLK_HZ);
+    if (status != W25Q_OK) return status;
+
+    // --- Read JEDEC / device info ---
+    status = W25Q_ReadInfo(handle, &handle->info);
+
+
+    // --- Restore clock regardless of result ---
+    W25Q_setCLK(handle, prev_clk);
+
+    if (status != W25Q_OK) return status;
+
+    // --- Validate device ---
+    if (handle->info.Manufacturer == 0x00 ||
+        handle->info.MemoryType  == 0x00 ||
+        handle->info.Capacity    == 0x00)
+    {
+        return W25Q_UNKNOWN_ERROR;
+    }
+
+    const uint32_t *uuid = (const uint32_t *)handle->info.uuid;
+    if ((uuid[0] | uuid[1]) == 0)
+        return W25Q_UNKNOWN_ERROR;
+
+    handle->initialized = true;
+
+    return W25Q_OK;
 }
 
-void HAL_QSPI_RxCpltCallback(QSPI_HandleTypeDef *hqspi){
-	 qspi_done = true;
+bool W25Q_isDMAenabled(w25q_flash_handle_t handle){
+	W25Q_ASSERT(handle);
+	return w25q_port_is_DMA_enabled(handle->port_ctx);
 }
-void HAL_QSPI_TxCpltCallback(QSPI_HandleTypeDef *hqspi){
-	 qspi_done = true;
+uint32_t W25Q_getCLK(w25q_flash_handle_t handle){
+	W25Q_ASSERT(handle);
+	return w25q_port_getCLK(handle->port_ctx);
 }
-
-
-static inline void dcache_invalidate_by_addr(void *addr, size_t len)
-{
-    const uint32_t line = 32;
-    const uint32_t lineMsk = (line - 1);
-    uintptr_t start = (uintptr_t)addr & ~lineMsk;
-    size_t  size = ((len + ((uintptr_t)addr & lineMsk) + lineMsk) & ~lineMsk);
-
-    __DSB();
-    if(SCB->CCR & SCB_CCR_DC_Msk)
-    	SCB_InvalidateDCache_by_Addr((uint32_t*)start, size);
-}
-static inline void dcache_clean_by_addr(void *addr, size_t len)
-{
-	const uint32_t line = 32;
-	const uint32_t lineMsk = (line - 1);
-	uintptr_t start = (uintptr_t)addr & ~lineMsk;
-	size_t  size = ((len + ((uintptr_t)addr & lineMsk) + lineMsk) & ~lineMsk);
-    __DSB();
-    if(SCB->CCR & SCB_CCR_DC_Msk)
-    	SCB_CleanDCache_by_Addr((uint32_t*)start, size);
-}
-static inline void dcache_clean_unaligned_lines_by_addr(void *addr, size_t len)
-{
-#if defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
-	const uint32_t line = 32;
-	const uint32_t lineMsk = (line - 1);
-
-	__DSB();
-	if(!(SCB->CCR & SCB_CCR_DC_Msk)) return;
-
-    uintptr_t start_line = (uintptr_t)addr & ~lineMsk;
-    uintptr_t end_line   = ((uintptr_t)addr + len - 1) & ~lineMsk;
-
-    //если начало массива не выравнено
-    if ((uintptr_t)addr & lineMsk)
-        SCB->DCCMVAC = start_line;
-
-    //если  конец массива не выравнен
-    if (end_line != start_line && (((uintptr_t)addr + len) & lineMsk))
-        SCB->DCCMVAC = end_line;
-
-	__DSB();
-	__ISB();
-#endif
+w25q_status_t W25Q_setCLK(w25q_flash_handle_t handle, uint32_t clk){
+	W25Q_ASSERT(handle);
+	w25q_status_t status;
+	status = w25q_port_setCLK(handle->port_ctx, clk);
+	if(status != W25Q_OK) handle->lastError = status;
+	return status;
 }
 
 
 
-
-HAL_StatusTypeDef W25Q_init(w25q_flash_handle_t handle){
-	assert_param(handle);
-	assert_param(handle->hqspi);
-
-	uint32_t qspi_clk = HAL_RCC_GetHCLKFreq();
-	uint32_t prescaler = handle->hqspi->Init.ClockPrescaler + 1;
-	handle->flash_freq = qspi_clk / prescaler;
-
-	HAL_StatusTypeDef status = W25Q_ReadInfo(handle, &handle->info);
-	if(status != HAL_OK) return status;
-
-	if(handle->info.Capacity == 0 ) return HAL_ERROR;
-	if(handle->info.MemoryType == 0 ) return HAL_ERROR;
-	if(handle->info.Manufacturer == 0 ) return HAL_ERROR;
-	uint32_t* uuid = (uint32_t*)handle->info.uuid;
-	if((uuid[0] | uuid[1]) == 0) return HAL_ERROR;
-
-
-	if(handle->hqspi->hdma){
-
-	}
-
-
-
-	return HAL_OK;
-}
-
-
-HAL_StatusTypeDef W25Q_ReadInfo(w25q_flash_handle_t handle, w25q_info_t* info){
-	assert_param(handle);
-	assert_param(info);
+w25q_status_t W25Q_ReadInfo(w25q_flash_handle_t handle, w25q_info_t* info){
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(info);
 
 	memset(info, 0, sizeof(w25q_info_t));
 
 	uint8_t id[8];
 	memset(id, 0, sizeof(id));
 
-	HAL_StatusTypeDef status = W25Q_ReadID(handle, id);
-	if(status != HAL_OK) return status;
+	w25q_status_t status = W25Q_ReadID(handle, id);
+	if(status != W25Q_OK) return status;
 
 	info->Manufacturer = id[0];
 	info->MemoryType = id[1];
 	info->Capacity = id[2];
+	info->CapacityBytes = (1UL << info->Capacity);
 
-	memset(id, 0, sizeof(id));
-	status = W25Q_ReadUUID(handle, id);
-	if(status != HAL_OK) return status;
-
-	memcpy(info->uuid, id, sizeof(id));
-
-	return HAL_OK;
+	status = W25Q_ReadUUID(handle, info->uuid);
+	return status;
 }
 
 
 
-HAL_StatusTypeDef W25Q_ReadID(w25q_flash_handle_t handle, uint8_t *id)
+w25q_status_t W25Q_ReadID(w25q_flash_handle_t handle, uint8_t *id)
 {
-	assert_param(handle);
-	assert_param(id);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(id);
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_JEDEC_ID;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_RX;
+	transfer.data_len = 3;
+	transfer.buf = id;
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;   // JEDEC ID всегда 1-1-1
-    sCommand.Instruction         = W25Q_CMD_JEDEC_ID;              // JEDEC ID команда
-    sCommand.AddressMode         = QSPI_ADDRESS_NONE;
-    sCommand.AddressSize         = QSPI_ADDRESS_24_BITS;      // значение не используется, но лучше выставить
-    sCommand.Address             = 0;
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (3>=DMA_THRESHOLD);
+#endif
 
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-    sCommand.AlternateBytesSize  = QSPI_ALTERNATE_BYTES_8_BITS; // значение по умолчанию
-    sCommand.AlternateBytes      = 0;
+    w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
+    }
 
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = 3; // Manufacturer, Memory Type, Capacity
+    /* basic validation */
+    if (id[0] == 0x00 || id[0] == 0xFF)
+    	status = W25Q_INVALID_DEVICE;
 
-    sCommand.DummyCycles         = 0;
+    return status;
 
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if (HAL_QSPI_Receive(handle->hqspi, id, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    return HAL_OK;
 }
-HAL_StatusTypeDef W25Q_ReadUUID(w25q_flash_handle_t handle, uint8_t *id){
+w25q_status_t W25Q_ReadUUID(w25q_flash_handle_t handle, uint8_t *id){
 
-	assert_param(handle);
-	assert_param(id);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(id);
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_READ_UNIQUE_ID;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_RX;
+	transfer.data_len = 8;
+	transfer.buf = id;
+	transfer.alt_bits = W25Q_XFER_BITS_32;
+	transfer.alt_data = 0;
+	transfer.alt_lines = W25Q_XFER_LINES_1;
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_READ_UNIQUE_ID;
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (8>=DMA_THRESHOLD);
+#endif
 
-    sCommand.AddressMode         = QSPI_ADDRESS_NONE;
+    w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK)
+    	handle->lastError = status;
 
-    sCommand.AlternateByteMode 	 = QSPI_ALTERNATE_BYTES_NONE;
-
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_1_LINE;
-    sCommand.AlternateBytes 	 = 0;
-    sCommand.AlternateBytesSize	 = QSPI_ALTERNATE_BYTES_32_BITS;
-    // 4 dummy байта = 32 такта
-
-
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = 8;
-
-    sCommand.DummyCycles         = 0 ;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if (HAL_QSPI_Receive(handle->hqspi, id, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    return HAL_OK;
+    return status;
 }
 
 
 
 
-HAL_StatusTypeDef W25Q_ReadStatusReg1(w25q_flash_handle_t handle, w25q_StatusReg1_t* reg){
-	assert_param(handle);
+w25q_status_t W25Q_ReadStatusReg1(w25q_flash_handle_t handle, w25q_StatusReg1_t* reg){
+	W25Q_ASSERT(handle);
 
-	w25q_StatusReg1_t sr1 = {0};
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_READ_STATUS_REGISTER_1;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_RX;
+	transfer.data_len = 1;
+	transfer.buf = &handle->cachedStatusRegs.sreg1;
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_READ_STATUS_REGISTER_1;
-    sCommand.AddressMode         = QSPI_ADDRESS_NONE;
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = 1;
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if (HAL_QSPI_Receive(handle->hqspi, &handle->cachedStatusRegs.sreg1, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
+    w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
+    }
 
     if(reg) *reg = handle->cachedStatusRegs.sreg1;
     handle->isCachedStatusReg1Valid = 1;
-    return HAL_OK;
+    return status;
 
 }
-HAL_StatusTypeDef W25Q_ReadStatusReg2(w25q_flash_handle_t handle, w25q_StatusReg2_t* reg){
-	assert_param(handle);
+w25q_status_t W25Q_ReadStatusReg2(w25q_flash_handle_t handle, w25q_StatusReg2_t* reg){
+	W25Q_ASSERT(handle);
 
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_READ_STATUS_REGISTER_2;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_RX;
+	transfer.data_len = 1;
+	transfer.buf = &handle->cachedStatusRegs.sreg2;
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_READ_STATUS_REGISTER_2;
-    sCommand.AddressMode         = QSPI_ADDRESS_NONE;
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
+    w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
+    }
 
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = 1;
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if (HAL_QSPI_Receive(handle->hqspi, &handle->cachedStatusRegs.sreg2, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
 
     if(reg) *reg = handle->cachedStatusRegs.sreg2;
     handle->isCachedStatusReg2Valid = 1;
 
-    return HAL_OK;
+    return status;
 }
 
-HAL_StatusTypeDef W25Q_WriteStatusRegs(w25q_flash_handle_t handle, w25q_StatusRegs_t* regs){
-	assert_param(handle);
-	assert_param(regs);
+w25q_status_t W25Q_WriteStatusRegs(w25q_flash_handle_t handle, w25q_StatusRegs_t* regs){
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(regs);
 
-	if (W25Q_writeEnable(handle)) return HAL_ERROR;
-
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
-
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_WRITE_STATUS_REGISTER;
-    sCommand.AddressMode         = QSPI_ADDRESS_NONE;
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = 2; // SR1 + SR2
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if(HAL_QSPI_Transmit(handle->hqspi, (uint8_t*)regs, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-    	return HAL_ERROR;
-
-    return HAL_OK;
-
-}
-
-
-HAL_StatusTypeDef W25Q_UpdateSatatus(w25q_flash_handle_t handle){
-	assert_param(handle);
-
-	if (W25Q_ReadStatusReg1(handle, NULL) != HAL_OK) {
-		return HAL_ERROR;
+	w25q_status_t status;
+	status = W25Q_writeEnable(handle);
+	if(status != W25Q_OK) {
+		handle->lastError = status;
+		return status;
 	}
 
-	if (W25Q_ReadStatusReg2(handle, NULL) != HAL_OK) {
-		return HAL_ERROR;
+
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_WRITE_STATUS_REGISTER;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_TX;
+	transfer.data_len = 2; // SR1 + SR2
+	transfer.buf = regs;
+
+    status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) handle->lastError = status;
+    return status;
+
+}
+
+
+w25q_status_t W25Q_UpdateSatatus(w25q_flash_handle_t handle){
+	W25Q_ASSERT(handle);
+
+	w25q_status_t status;
+	status = W25Q_ReadStatusReg1(handle, NULL);
+	if(status != W25Q_OK) {
+		handle->lastError = status;
+		return status;
 	}
-	return HAL_OK;
+	status = W25Q_ReadStatusReg2(handle, NULL);
+	if(status != W25Q_OK) {
+		handle->lastError = status;
+		return status;
+	}
+	return status;
 }
 
 
-HAL_StatusTypeDef W25Q_sendCommand(w25q_flash_handle_t handle, uint8_t cmd){
-	assert_param(handle);
+w25q_status_t W25Q_sendCommand(w25q_flash_handle_t handle, uint8_t cmd){
+	W25Q_ASSERT(handle);
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = cmd;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_NONE;
+	transfer.direction = W25Q_XFER_NONE;
 
-
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
-
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = cmd;
-    sCommand.AddressMode         = QSPI_ADDRESS_NONE;
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-    sCommand.DataMode            = QSPI_DATA_NONE;
-    sCommand.NbData              = 0;
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    return HAL_OK;
-
+    w25q_status_t status = w25q_port_send_command(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK)
+    	handle->lastError = status;
+    return status;
 }
 
-HAL_StatusTypeDef W25Q_writeEnable(w25q_flash_handle_t handle){
+w25q_status_t W25Q_writeEnable(w25q_flash_handle_t handle){
 	return W25Q_sendCommand(handle, W25Q_CMD_WRITE_ENABLE );
 }
-HAL_StatusTypeDef W25Q_writeDisable(w25q_flash_handle_t handle){
+w25q_status_t W25Q_writeDisable(w25q_flash_handle_t handle){
 	return W25Q_sendCommand(handle, W25Q_CMD_WRITE_DISABLE );
 }
 
 
-HAL_StatusTypeDef W25Q_PageProgramm(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size){
-	assert_param(handle);
-	assert_param(data);
-    //assert_param(size <= W25Q_PAGE_SIZE);
-    //assert_param(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
+w25q_status_t W25Q_PageProgram(w25q_flash_handle_t handle, uint32_t adress, uint8_t* data, uint16_t size){
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+    //W25Q_ASSERT(size <= W25Q_PAGE_SIZE);
+    //W25Q_ASSERT(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
 
-    if (W25Q_writeEnable(handle)) return HAL_ERROR;
+	w25q_status_t status;
+	status = W25Q_writeEnable(handle);
+	if(status != W25Q_OK) {
+		handle->lastError = status;
+		return status;
+	}
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_PAGE_PROGRAM;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_1;
+	transfer.address = adress;
+	transfer.addr_bits = W25Q_XFER_BITS_24;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_TX;
+	transfer.data_len = size;
+	transfer.buf = data;
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_PAGE_PROGRAM;
-    sCommand.AddressMode         = QSPI_ADDRESS_1_LINE;
-    sCommand.AddressSize		 = QSPI_ADDRESS_24_BITS;
-    sCommand.Address			 = adress;
-
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = size;
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if(!handle->hqspi->hdma){
-    	if(HAL_QSPI_Transmit(handle->hqspi, (uint8_t*)data, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-    		return HAL_ERROR;
-    } else {
-    	dcache_clean_by_addr(data, size);
-		W25Q_DMA_startTransfer();
-		if (HAL_QSPI_Transmit_DMA(handle->hqspi, data) != HAL_OK)
-		    return HAL_ERROR;
-		if (W25Q_DMA_waitTransferComplete(5000) != HAL_OK)
-		    return HAL_ERROR;
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
+    status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
     }
 
 
-    if(W25Q_AutoPollingMemReady(handle, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-    	return HAL_ERROR;
+    status = W25Q_AutoPollingMemReady(handle, W25Q_COMMON_TIMEOUT_MS);
+	return status;
 
-    return HAL_OK;
 }
 
 
 
-HAL_StatusTypeDef W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
-	assert_param(handle);
-	assert_param(data);
-    assert_param(adress < W25Q_HIGH_ADDRESS);
-    assert_param((adress + size) <= W25Q_HIGH_ADDRESS);
-
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
-
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_READ_DATA;
-    sCommand.AddressMode         = QSPI_ADDRESS_1_LINE;
-    sCommand.AddressSize		 = QSPI_ADDRESS_24_BITS;
-    sCommand.Address			 = address;
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-
-    sCommand.DataMode            = QSPI_DATA_1_LINE;
-    sCommand.NbData              = size; // size;
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
+w25q_status_t W25Q_ReadData(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+    W25Q_ASSERT(address < W25Q_HIGH_ADDRESS);
+    W25Q_ASSERT((address + size) <= W25Q_HIGH_ADDRESS);
 
 
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-       return HAL_ERROR;
+	W25Q_ASSERT(handle);
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_READ_DATA;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
 
+	transfer.addr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_bits = W25Q_XFER_BITS_24;
 
-    if(!handle->hqspi->hdma){
-		if (HAL_QSPI_Receive(handle->hqspi, data, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-			return HAL_ERROR;
-    } else {
-    	dcache_clean_unaligned_lines_by_addr(data, size);
-		W25Q_DMA_startTransfer();
-		if (HAL_QSPI_Receive_DMA(handle->hqspi, data) != HAL_OK)
-		    return HAL_ERROR;
-		if (W25Q_DMA_waitTransferComplete(5000) != HAL_OK)
-		    return HAL_ERROR;
-		dcache_invalidate_by_addr(data, size);
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.data_len = size;
+	transfer.buf = data;
+	transfer.direction = W25Q_XFER_RX;
+
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
+
+    w25q_status_t status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
     }
+    return status;
 
-    return HAL_OK;
 }
 
 
 
 
-HAL_StatusTypeDef W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t timeout){
-
-	assert_param(handle);
-
-	QSPI_CommandTypeDef sCommand;
-	memset(&sCommand, 0, sizeof(sCommand));
-
-	sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-	sCommand.Instruction         = W25Q_CMD_READ_STATUS_REGISTER_1;
-	sCommand.AddressMode         = QSPI_ADDRESS_NONE;
-	sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-
-	sCommand.DataMode            = QSPI_DATA_1_LINE;
-	sCommand.NbData              = 1;
-	sCommand.DummyCycles         = 0;
-
-	sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-	sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-	sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
 
 
-    QSPI_AutoPollingTypeDef sConfig;
-    memset(&sConfig, 0, sizeof(sConfig));
-    w25q_StatusReg1_t StatusRegMsk = {0};
-    StatusRegMsk.BUSY = 1; // looking only busy flag
-    sConfig.Mask = StatusRegMsk.raw;
-    sConfig.Match = 0; // busy should be zeroed
-    sConfig.Interval = 0x10;
-    sConfig.MatchMode = QSPI_MATCH_MODE_AND;
-    sConfig.AutomaticStop = QSPI_AUTOMATIC_STOP_ENABLE;
-    sConfig.StatusBytesSize = 1;
 
 
-	if (HAL_QSPI_AutoPolling(handle->hqspi, &sCommand, &sConfig, timeout) != HAL_OK)
-		return HAL_ERROR;
 
-	return HAL_OK;
+
+
+
+
+
+
+
+
+
+
+
+w25q_status_t W25Q_AutoPollingMemReady(w25q_flash_handle_t handle, uint32_t timeout){
+
+	W25Q_ASSERT(handle);
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_READ_STATUS_REGISTER_1;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_lines = W25Q_XFER_LINES_NONE;
+	transfer.data_lines = W25Q_XFER_LINES_1;
+	transfer.direction = W25Q_XFER_RX;
+	transfer.data_len = 1;
+
+	w25q_StatusReg1_t StatusRegMsk = {0};
+	StatusRegMsk.BUSY = 1; // looking only busy flag
+
+    w25q_status_t status = w25q_port_autoPolling(handle, &transfer, StatusRegMsk.raw, 0, timeout);
+    if(status != W25Q_OK) handle->lastError = status;
+    return status;
+
 }
 
-HAL_StatusTypeDef W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25q_sector_t sector){
-	assert_param(handle);
-    assert_param(adress < W25Q_HIGH_ADDRESS);
+w25q_status_t W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address, w25q_sector_t sector){
+	W25Q_ASSERT(handle);
+    W25Q_ASSERT(address < W25Q_HIGH_ADDRESS);
 
 
-	if(W25Q_writeEnable(handle)) return HAL_ERROR;
+	w25q_status_t status;
+	status = W25Q_writeEnable(handle);
+	if(status != W25Q_OK) return status;
 
-	uint32_t Instruction = 0;
-	uint32_t AddressMode = 0;
+
+	W25Q_ASSERT(handle);
+	w25q_transfer_t transfer = {0};
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_bits = W25Q_XFER_BITS_24;
+
 	uint32_t timeout = 0;
 	switch(sector){
 	case W25Q_SECTOR_TYPE_4K:
-		Instruction = W25Q_CMD_SECTOR_ERASE_4KB;
-		AddressMode = QSPI_ADDRESS_1_LINE;
-		timeout = 400;
+		transfer.instruction = W25Q_CMD_SECTOR_ERASE_4KB;
+		transfer.addr_lines = W25Q_XFER_LINES_1;
+		timeout = W25Q_ERASE_4K_TIMEOUT_MS;
 		break;
 	case W25Q_SECTOR_TYPE_32K:
-		Instruction = W25Q_CMD_BLOCK_ERASE_32KB;
-		AddressMode = QSPI_ADDRESS_1_LINE;
-		timeout = 800;
+		transfer.instruction = W25Q_CMD_BLOCK_ERASE_32KB;
+		transfer.addr_lines = W25Q_XFER_LINES_1;
+		timeout = W25Q_ERASE_32K_TIMEOUT_MS;
 		break;
 	case W25Q_SECTOR_TYPE_64K:
-		Instruction = W25Q_CMD_BLOCK_ERASE_64KB;
-		AddressMode = QSPI_ADDRESS_1_LINE;
-		timeout = 1000;
+		transfer.instruction = W25Q_CMD_BLOCK_ERASE_64KB;
+		transfer.addr_lines = W25Q_XFER_LINES_1;
+		timeout = W25Q_ERASE_64K_TIMEOUT_MS;
 		break;
 	case W25Q_SECTOR_TYPE_ALLCHIP:
-		Instruction = W25Q_CMD_CHIP_ERASE;
-		AddressMode = QSPI_ADDRESS_NONE;
-		timeout = 15000;
+		transfer.instruction = W25Q_CMD_CHIP_ERASE;
+		transfer.addr_lines = W25Q_XFER_LINES_NONE;
+		timeout = W25Q_ERASE_FULL_TIMEOUT_MS;
 		break;
 	}
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = Instruction;
-    sCommand.AddressMode         = AddressMode;
-    sCommand.AddressSize		 = QSPI_ADDRESS_24_BITS;
-    sCommand.Address			 = address;
-
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
-
-    sCommand.DataMode            = QSPI_DATA_NONE;
-    sCommand.NbData              = 0;
-    sCommand.DummyCycles         = 0;
-
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
+    status = w25q_port_send_command(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
+    }
 
 
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-
-	if(W25Q_AutoPollingMemReady(handle, timeout))
-		return HAL_ERROR;
-	return HAL_OK;
+    status = W25Q_AutoPollingMemReady(handle, timeout);
+    return status;
 }
 
 
@@ -583,183 +461,139 @@ HAL_StatusTypeDef W25Q_SectorErase(w25q_flash_handle_t handle, uint32_t address,
 // fast functions
 
 
-HAL_StatusTypeDef W25Q_QuadPageProgramm(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
+w25q_status_t W25Q_QuadPageProgram(w25q_flash_handle_t handle, uint32_t address, uint8_t* data, uint32_t size){
 
-	assert_param(handle);
-	assert_param(data);
-//    assert_param(size <= W25Q_PAGE_SIZE);
-//    assert_param(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+//    W25Q_ASSERT(size <= W25Q_PAGE_SIZE);
+//    W25Q_ASSERT(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
 
-    if (W25Q_writeEnable(handle)) return HAL_ERROR;
-
+	w25q_status_t status;
+	status = W25Q_writeEnable(handle);
+	if(status != W25Q_OK) return status;
 
     if(!handle->isCachedStatusReg2Valid){
-    	W25Q_UpdateSatatus(handle);
+    	status = W25Q_UpdateSatatus(handle);
+    	if(status != W25Q_OK) return status;
     }
     if(!handle->cachedStatusRegs.sreg2.QE){
     	handle->cachedStatusRegs.sreg2.QE = 1;
-    	if(W25Q_WriteStatusRegs(handle, &handle->cachedStatusRegs)){
-    		return HAL_ERROR;
-    	}
+    	status = W25Q_WriteStatusRegs(handle, &handle->cachedStatusRegs);
+        if(status != W25Q_OK) return status;
     }
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.Instruction         = W25Q_CMD_QUAD_PAGE_PROGRAM;
-    sCommand.AddressMode         = QSPI_ADDRESS_1_LINE;
-    sCommand.AddressSize		 = QSPI_ADDRESS_24_BITS;
-    sCommand.Address			 = address;
+	w25q_transfer_t transfer = {0};
+	transfer.instruction = W25Q_CMD_QUAD_PAGE_PROGRAM;
+	transfer.instr_lines = W25Q_XFER_LINES_1;
 
-    sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
+	transfer.addr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_bits = W25Q_XFER_BITS_24;
 
-    sCommand.DataMode            = QSPI_DATA_4_LINES;
-    sCommand.NbData              = size;
-    sCommand.DummyCycles         = 0;
+	transfer.data_lines = W25Q_XFER_LINES_4;
+	transfer.data_len = size;
+	transfer.buf = data;
+	transfer.direction = W25Q_XFER_TX;
 
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
 
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
-
-    if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-        return HAL_ERROR;
-
-    if(!handle->hqspi->hdma){
-
-		if(HAL_QSPI_Transmit(handle->hqspi, (uint8_t*)data, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-			return HAL_ERROR;
-
-	} else {
-		dcache_clean_by_addr(data, size);
-		W25Q_DMA_startTransfer();
-		if (HAL_QSPI_Transmit_DMA(handle->hqspi, data) != HAL_OK)
-			return HAL_ERROR;
-
-		if (W25Q_DMA_waitTransferComplete(5000) != HAL_OK)
-			return HAL_ERROR;
-	}
-
-
-    if(W25Q_AutoPollingMemReady(handle, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-    	return HAL_ERROR;
-
-    return HAL_OK;
-
-
+    status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) {
+    	handle->lastError = status;
+    	return status;
+    }
+    status = W25Q_AutoPollingMemReady(handle, W25Q_COMMON_TIMEOUT_MS);
+    return status;
 }
 
 
 
 
 
-HAL_StatusTypeDef W25Q_FastRead(w25q_flash_handle_t handle,
+w25q_status_t W25Q_FastRead(w25q_flash_handle_t handle,
 								uint32_t address,
 								uint8_t* data,
 								uint32_t size,
 								w25q_fr_mode_t mode)
 {
-	assert_param(handle);
-	assert_param(data);
-//    assert_param(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
-
+	W25Q_ASSERT(handle);
+	W25Q_ASSERT(data);
+//    W25Q_ASSERT(((adress & W25Q_PAGE_SIZE_MSK) + size) <= W25Q_PAGE_SIZE);
 
 
     if(mode == W25Q_FR_MODE_BEST_AVAILABLE)
     	mode = W25Q_FR_MODE_QIO;
 
+
+    w25q_status_t status;
     if(mode == W25Q_FR_MODE_QIO || mode == W25Q_FR_MODE_QO){
         if(!handle->isCachedStatusReg2Valid){
-        	W25Q_UpdateSatatus(handle);
+        	status = W25Q_UpdateSatatus(handle);
+        	if(status != W25Q_OK) return status;
         }
         if(!handle->cachedStatusRegs.sreg2.QE){
         	handle->cachedStatusRegs.sreg2.QE = 1;
-        	if(W25Q_WriteStatusRegs(handle, &handle->cachedStatusRegs)){
-        		return HAL_ERROR;
-        	}
+        	status = W25Q_WriteStatusRegs(handle, &handle->cachedStatusRegs);
+			if(status != W25Q_OK) return status;
         }
     }
 
 
-    QSPI_CommandTypeDef sCommand;
-    memset(&sCommand, 0, sizeof(sCommand));
+	w25q_transfer_t transfer = {0};
+	transfer.instr_lines = W25Q_XFER_LINES_1;
+	transfer.addr_bits = W25Q_XFER_BITS_24;
+	transfer.data_len = size;
+	transfer.buf = data;
+	transfer.direction = W25Q_XFER_RX;
 
-    sCommand.InstructionMode     = QSPI_INSTRUCTION_1_LINE;
-    sCommand.AddressSize = QSPI_ADDRESS_24_BITS;
-    sCommand.Address	 = address;
-    sCommand.NbData              = size;
-    sCommand.DdrMode             = QSPI_DDR_MODE_DISABLE;
-    sCommand.DdrHoldHalfCycle    = QSPI_DDR_HHC_ANALOG_DELAY;
-    sCommand.SIOOMode            = QSPI_SIOO_INST_EVERY_CMD;
-
+#if DMA_ENABLE==1
+	transfer.prefer_dma = (size>=DMA_THRESHOLD);
+#endif
 
     switch(mode){
     case W25Q_FR_MODE_DO:
-    	sCommand.Instruction = W25Q_CMD_FAST_READ_DUAL_OUTPUT;
-    	sCommand.AddressMode = QSPI_ADDRESS_1_LINE;
-    	sCommand.DataMode	 = QSPI_DATA_2_LINES;
-    	sCommand.DummyCycles = 8;
-    	sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
+    	transfer.instruction = W25Q_CMD_FAST_READ_DUAL_OUTPUT;
+    	transfer.addr_lines = W25Q_XFER_LINES_1;
+    	transfer.data_lines	 = W25Q_XFER_LINES_2;
+    	transfer.dummy_cycles = 8;
     	break;
     case W25Q_FR_MODE_QO:
-    	sCommand.Instruction = W25Q_CMD_FAST_READ_QUAD_OUTPUT;
-    	sCommand.AddressMode = QSPI_ADDRESS_1_LINE;
-    	sCommand.DataMode	 = QSPI_DATA_4_LINES;
-    	sCommand.DummyCycles = 8;
-    	sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
+    	transfer.instruction = W25Q_CMD_FAST_READ_QUAD_OUTPUT;
+    	transfer.addr_lines = W25Q_XFER_LINES_1;
+    	transfer.data_lines	 = W25Q_XFER_LINES_4;
+    	transfer.dummy_cycles = 8;
     	break;
     case W25Q_FR_MODE_DIO:
-    	sCommand.Instruction = W25Q_CMD_FAST_READ_DUAL_IO;
-    	sCommand.AddressMode = QSPI_ADDRESS_2_LINES;
-    	sCommand.DataMode	 = QSPI_DATA_2_LINES;
-    	sCommand.DummyCycles = 0;
-    	sCommand.AlternateByteMode = QSPI_ALTERNATE_BYTES_2_LINES;
-		sCommand.AlternateBytes = 0x00;     // Continuous Read Mode disabled
-		sCommand.AlternateBytesSize = QSPI_ALTERNATE_BYTES_8_BITS;
+    	transfer.instruction = W25Q_CMD_FAST_READ_DUAL_IO;
+    	transfer.addr_lines = W25Q_XFER_LINES_2;
+    	transfer.data_lines	 = W25Q_XFER_LINES_2;
+    	transfer.alt_bits = W25Q_XFER_BITS_8;
+    	transfer.alt_lines = W25Q_XFER_LINES_2;
+    	transfer.alt_data = 0x00; // Continuous Read Mode disabled
     	break;
     case W25Q_FR_MODE_QIO:
-    	sCommand.Instruction = W25Q_CMD_FAST_READ_QUAD_IO;
-    	sCommand.AddressMode = QSPI_ADDRESS_4_LINES;
-    	sCommand.DataMode	 = QSPI_DATA_4_LINES;
-    	sCommand.DummyCycles = 4;
-    	sCommand.AlternateByteMode = QSPI_ALTERNATE_BYTES_4_LINES;
-		sCommand.AlternateBytes = 0x00;    // Continuous Read Mode disabled
-		sCommand.AlternateBytesSize = QSPI_ALTERNATE_BYTES_8_BITS;
+    	transfer.instruction = W25Q_CMD_FAST_READ_QUAD_IO;
+    	transfer.addr_lines = W25Q_XFER_LINES_4;
+    	transfer.data_lines	 = W25Q_XFER_LINES_4;
+    	transfer.dummy_cycles = 4;
+    	transfer.alt_bits = W25Q_XFER_BITS_8;
+		transfer.alt_lines = W25Q_XFER_LINES_4;
+		transfer.alt_data = 0x00; // Continuous Read Mode disabled
     	break;
     case W25Q_FR_MODE_SIO:
     default:
-    	sCommand.Instruction = W25Q_CMD_FAST_READ;
-    	sCommand.AddressMode = QSPI_ADDRESS_1_LINE;
-    	sCommand.DataMode	 = QSPI_DATA_1_LINE;
-    	sCommand.DummyCycles = 8;
-    	sCommand.AlternateByteMode   = QSPI_ALTERNATE_BYTES_NONE;
+    	transfer.instruction = W25Q_CMD_FAST_READ;
+    	transfer.addr_lines = W25Q_XFER_LINES_1;
+    	transfer.data_lines	 = W25Q_XFER_LINES_1;
+    	transfer.dummy_cycles = 8;
     }
 
-	if (HAL_QSPI_Command(handle->hqspi, &sCommand, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-		return HAL_ERROR;
 
-    if(!handle->hqspi->hdma){
-
-		if (HAL_QSPI_Receive(handle->hqspi, data, HAL_QPSI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-			return HAL_ERROR;
-
-    } else {
-
-    	dcache_clean_unaligned_lines_by_addr(data, size);
-		W25Q_DMA_startTransfer();
-		if (HAL_QSPI_Receive_DMA(handle->hqspi, data) != HAL_OK)
-		    return HAL_ERROR;
-
-		if (W25Q_DMA_waitTransferComplete(5000) != HAL_OK)
-		    return HAL_ERROR;
-
-		dcache_invalidate_by_addr(data, size);
-
-    }
-
-    return HAL_OK;
+    status = w25q_port_transfer(handle->port_ctx, &transfer, W25Q_COMMON_TIMEOUT_MS);
+    if(status != W25Q_OK) handle->lastError = status;
+    return status;
 }
 
 
